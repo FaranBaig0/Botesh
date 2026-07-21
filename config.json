@@ -1,0 +1,30 @@
+{
+  "tracked_urls": [
+    {
+      "label": "Python Jobs",
+      "userQuery": "python",
+      "channel_id": 1527574861768167454
+    },
+    {
+      "label": "JavaScript Jobs",
+      "userQuery": "javascript",
+      "channel_id": 1528646877866627162
+    },
+    {
+      "label": "AI Jobs",
+      "userQuery": "ai",
+      "channel_id": 1528659456626262160
+    },
+    {
+      "label": "C Jobs",
+      "userQuery": "c",
+      "channel_id": 1528678430084698134
+    },
+    {
+      "label": "Django Jobs",
+      "userQuery": "django",
+      "channel_id": 1528703298792853524
+    }
+  ],
+  "fetch_interval": 30
+}

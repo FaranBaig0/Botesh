@@ -1,0 +1,106 @@
+import sqlite3
+from datetime import datetime
+
+class JobDB:
+    """Persistent SQLite database connection, deduplication & target manager."""
+
+    def __init__(self, path: str = "jobs.db"):
+        self.conn = sqlite3.connect(path, check_same_thread=False)
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS seen_jobs (
+                job_id VARCHAR(255),
+                url_source VARCHAR(500),
+                first_seen TIMESTAMP,
+                PRIMARY KEY (job_id, url_source)
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tracked_targets (
+                channel_id INTEGER PRIMARY KEY,
+                label TEXT NOT NULL,
+                user_query TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        self.conn.commit()
+
+    def is_new(self, job_id: str, url_source: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM seen_jobs WHERE job_id = ? AND url_source = ?",
+            (job_id, url_source),
+        ).fetchone()
+        return row is None
+
+    def mark_seen(self, job_id: str, url_source: str):
+        self.conn.execute(
+            "INSERT INTO seen_jobs (job_id, url_source, first_seen) VALUES (?, ?, ?)",
+            (job_id, url_source, datetime.now().isoformat()),
+        )
+        self.conn.commit()
+
+    def add_target(self, channel_id: int, label: str, user_query: str):
+        """Adds or updates a tracked search target in SQLite."""
+        self.conn.execute(
+            """
+            INSERT INTO tracked_targets (channel_id, label, user_query)
+            VALUES (?, ?, ?)
+            ON CONFLICT(channel_id) DO UPDATE SET
+                label = excluded.label,
+                user_query = excluded.user_query
+            """,
+            (channel_id, label, user_query),
+        )
+        self.conn.commit()
+
+    def remove_target(self, channel_id: int) -> bool:
+        """Removes a tracked target by channel_id."""
+        cursor = self.conn.execute(
+            "DELETE FROM tracked_targets WHERE channel_id = ?",
+            (channel_id,)
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def get_all_targets(self) -> list[dict]:
+        """Returns list of tracked targets formatted for the scraper."""
+        cursor = self.conn.execute(
+            "SELECT channel_id, label, user_query FROM tracked_targets"
+        )
+        rows = cursor.fetchall()
+        return [
+            {"channel_id": r[0], "label": r[1], "userQuery": r[2]}
+            for r in rows
+        ]
+
+    def seed_initial_targets(self, targets: list[dict]):
+        """Seeds initial targets if tracked_targets table is empty."""
+        existing = self.get_all_targets()
+        if not existing and targets:
+            for t in targets:
+                cid = t.get("channel_id")
+                label = t.get("label", "default")
+                query = t.get("userQuery", "python")
+                if cid:
+                    self.add_target(cid, label, query)
+
+    def cleanup_old_jobs(self, days: int = 30) -> int:
+        """Removes seen job records older than specified days."""
+        cursor = self.conn.execute(
+            """
+            DELETE FROM seen_jobs
+            WHERE first_seen < datetime('now', '-' || ? || ' days')
+            """,
+            (days,)
+        )
+        self.conn.commit()
+        if cursor.rowcount > 0:
+            print(f"🧹 [Database] Cleaned up {cursor.rowcount} seen_jobs records older than {days} days.")
+        return cursor.rowcount
+
+    def close(self):
+        self.conn.close()
+
