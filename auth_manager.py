@@ -73,22 +73,14 @@ class AuthManager:
             if os.name == "nt":
                 try:
                     os.system("taskkill /f /im chromedriver.exe >nul 2>&1")
+                    os.system("taskkill /f /im chrome.exe >nul 2>&1")
                 except Exception:
                     pass
-            
-            profile_dir = os.path.abspath("selenium_profile")
-            for lock_item in ["SingletonLock", "SingletonSocket", "SingletonCookie"]:
-                lf = os.path.join(profile_dir, lock_item)
-                if os.path.exists(lf):
-                    try:
-                        os.remove(lf)
-                    except Exception:
-                        pass
 
             driver = None
             try:
-                driver = Driver(uc=True, headless=True, user_data_dir=profile_dir)
-                driver.uc_open_with_reconnect("https://www.upwork.com/nx/search/jobs/?q=python", reconnect_time=3)
+                driver = Driver(uc=True, headless=True)
+                driver.uc_open("https://www.upwork.com/nx/search/jobs/?q=python")
 
                 cookie_string = ""
                 visitor_token = None
@@ -134,7 +126,6 @@ class AuthManager:
                     self.last_token = token_str
                     self._save_cache()  # Save to disk for instant bot restarts
                     print("🔑 Headless guest token extracted successfully!")
-                    print(f"Cookies ye hein: {cookie_string} || token ye hein: {token_str}")
                     return cookie_string, token_str
                 
                 print("⚠️ [AuthManager] Failed to find visitor token in headless mode.")

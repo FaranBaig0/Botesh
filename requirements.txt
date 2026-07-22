@@ -1,0 +1,20 @@
+﻿# ─── Core Discord Bot ─────────────────────────────────────────────────────────
+discord.py==2.7.1
+
+# ─── HTTP Engine (Cloudflare TLS Fingerprint Bypass) ──────────────────────────
+curl_cffi==0.15.0
+
+# ─── Headless Browser (Token Extraction & Cloudflare Challenge Solver) ────────
+seleniumbase==4.51.3
+
+# ─── Environment Variables & Secrets ─────────────────────────────────────────
+python-dotenv==1.2.2
+
+# ─── Memory & Process Monitoring ──────────────────────────────────────────────
+psutil==7.2.2
+
+# ─── Standard Library (built-in, no install needed) ──────────────────────────
+# sqlite3  — job deduplication & target management
+# asyncio  — async event loop & concurrent scraping
+# threading — concurrency lock for token refresh
+# json, os, re, datetime — general utilities
