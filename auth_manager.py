@@ -80,31 +80,26 @@ class AuthManager:
             driver = None
             try:
                 driver = Driver(uc=True, headless=True)
-                driver.uc_open("https://www.upwork.com/nx/search/jobs/?q=python")
+                driver.uc_open("https://www.upwork.com/")
 
                 cookie_string = ""
                 visitor_token = None
 
-                # Fast polling loop: check cookies every 0.4s up to 12 times (max ~4.8s total)
-                for _ in range(12):
+                # Fast polling loop: check cookies every 0.4s up to 15 times
+                for _ in range(15):
                     selenium_cookies = driver.get_cookies()
                     cookie_string = "; ".join([f"{c['name']}={c['value']}" for c in selenium_cookies])
 
-                    # 1. Pehle specific UniversalSearchNuxt_vt token dhoondo (Job Search Token)
+                    # 1. Look for visitor_gql_token, UniversalSearchNuxt_vt or oauth2v2 token
                     for c in selenium_cookies:
-                        if c.get('name') == 'UniversalSearchNuxt_vt' and c.get('value'):
-                            visitor_token = c.get('value')
+                        name = c.get('name', '')
+                        val = c.get('value', '')
+                        if (name == 'visitor_gql_token' or name == 'UniversalSearchNuxt_vt') and val:
+                            visitor_token = val
                             break
-
-                    # 2. Fallback (Agar UniversalSearchNuxt_vt na mile to visitor_topnav_gql_token ko ignore kar ke baaqi check karein)
-                    if not visitor_token:
-                        for c in selenium_cookies:
-                            name = c.get('name', '')
-                            val = c.get('value', '')
-                            if name != 'visitor_topnav_gql_token' and ('_vt' in name or 'token' in name or 'Nuxt' in name) and val:
-                                if 'oauth2' in val or val.startswith('oauth2v2_'):
-                                    visitor_token = val
-                                    break
+                        if 'oauth2v2_' in val:
+                            visitor_token = val
+                            break
 
                     if visitor_token:
                         time.sleep(2.0)  # Brief pause to ensure token activation on Upwork backend
@@ -113,9 +108,7 @@ class AuthManager:
 
                 if not visitor_token:
                     try:
-                        visitor_token = driver.execute_script("return localStorage.getItem('visitor_gql_token');")
-                        if not visitor_token:
-                            visitor_token = driver.execute_script("return localStorage.getItem('oauth2_access_token');")
+                        visitor_token = driver.execute_script("return localStorage.getItem('visitor_gql_token') || localStorage.getItem('oauth2_access_token');")
                     except Exception:
                         pass
 
