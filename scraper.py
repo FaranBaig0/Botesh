@@ -57,43 +57,252 @@ GRAPHQL_PAYLOAD = {
 }
 
 JOB_DETAILS_QUERY = """
-query JobPubDetailsQuery($id: ID!) {
+fragment JobPubOpeningInfoFragment on Job {
+  ciphertext
+  id
+  type
+  access
+  title
+  hideBudget
+  createdOn
+  notSureProjectDuration
+  notSureFreelancersToHire
+  notSureExperienceLevel
+  notSureLocationPreference
+  premium
+}
+fragment JobPubOpeningSegmentationDataFragment on JobSegmentation {
+  customValue
+  label
+  name
+  sortOrder
+  type
+  value
+  skill {
+    description
+    externalLink
+    prettyName
+    skill
+    id
+  }
+}
+fragment JobPubOpeningSandDataFragment on SandsData {
+  occupation {
+    freeText
+    ontologyId
+    prefLabel
+    id
+    uid: id
+  }
+  ontologySkills {
+    groupId
+    id
+    freeText
+    prefLabel
+    groupPrefLabel
+    relevance
+  }
+  additionalSkills {
+    groupId
+    id
+    freeText
+    prefLabel
+    relevance
+  }
+}
+fragment JobPubOpeningFragment on JobPubOpeningInfo {
+  status
+  postedOn
+  publishTime
+  sourcingTime
+  startDate
+  deliveryDate
+  workload
+  contractorTier
+  description
+  info {
+    ...JobPubOpeningInfoFragment
+  }
+  segmentationData {
+    ...JobPubOpeningSegmentationDataFragment
+  }
+  sandsData {
+    ...JobPubOpeningSandDataFragment
+  }
+  category {
+    name
+    urlSlug
+  }
+  categoryGroup {
+    name
+    urlSlug
+  }
+  budget {
+    amount
+    currencyCode
+  }
+  annotations {
+    customFields
+    tags
+  }
+  engagementDuration {
+    label
+    weeks
+  }
+  extendedBudgetInfo {
+    hourlyBudgetMin
+    hourlyBudgetMax
+    hourlyBudgetType
+  }
+  attachments @include(if: $isLoggedIn) {
+    fileName
+    length
+    uri
+  }
+  clientActivity {
+    lastBuyerActivity
+    totalApplicants
+    totalHired
+    totalInvitedToInterview
+    unansweredInvites
+    invitationsSent
+    numberOfPositionsToHire
+  }
+  deliverables
+  deadline
+  tools {
+    name
+  }
+}
+fragment JobPubBuyerInfoFragment on JobPubBuyerInfo {
+  location {
+    offsetFromUtcMillis
+    countryTimezone
+    city
+    country
+  }
+  stats {
+    totalAssignments
+    activeAssignmentsCount
+    hoursCount
+    feedbackCount
+    score
+    totalJobsWithHires
+    totalCharges {
+      amount
+    }
+  }
+  company {
+    name @include(if: $isLoggedIn)
+    companyId @include(if: $isLoggedIn)
+    isEDCReplicated
+    contractDate
+    profile {
+      industry
+      size
+    }
+  }
+  jobs {
+    openCount @include(if: $isLoggedIn)
+    postedCount @include(if: $isLoggedIn)
+    openJobs @include(if: $isLoggedIn) {
+      id
+      uid: id
+      isPtcPrivate
+      ciphertext
+      title
+      type
+    }
+  }
+  avgHourlyJobsRate @include(if: $isLoggedIn) {
+    amount
+  }
+}
+fragment JobQualificationsFragment on JobQualifications {
+  countries
+  earnings
+  groupRecno
+  languages
+  localDescription
+  localFlexibilityDescription
+  localMarket
+  minJobSuccessScore
+  minOdeskHours
+  onSiteType
+  prefEnglishSkill
+  regions
+  risingTalent
+  shouldHavePortfolio
+  states
+  tests
+  timezones
+  type
+  locationCheckRequired
+  group {
+    groupId
+    groupLogo
+    groupName
+  }
+  location {
+    city
+    country
+    countryTimezone
+    offsetFromUtcMillis
+    state
+    worldRegion
+  }
+  locations {
+    id
+    type
+  }
+  minHoursWeek @skip(if: $isLoggedIn)
+  readyToStartToday {
+    expiresAt
+  }
+}
+fragment JobPubSimilarJobsFragment on PubSimilarJob {
+  id
+  ciphertext
+  title
+  description
+  engagement
+  durationLabel
+  contractorTier
+  type
+  createdOn
+  renewedOn
+  amount {
+    amount
+  }
+  maxAmount {
+    amount
+  }
+  ontologySkills {
+    id
+    prefLabel
+  }
+  hourlyBudgetMin
+  hourlyBudgetMax
+}
+query JobPubDetailsQuery($id: ID!, $isLoggedIn: Boolean!) {
   jobPubDetails(id: $id) {
     opening {
-      description
-      contractorTier
-      workload
-      clientActivity {
-        totalApplicants
-      }
-      engagementDuration {
-        label
-      }
-      annotations {
-        customFields
-      }
+      ...JobPubOpeningFragment
+    }
+    qualifications {
+      ...JobQualificationsFragment
     }
     buyer {
-      company {
-        contractDate
-      }
-      location {
-        country
-      }
-      stats {
-        totalAssignments
-        totalJobsWithHires
-        totalCharges {
-          amount
-        }
-      }
+      ...JobPubBuyerInfoFragment
+    }
+    similarJobs {
+      ...JobPubSimilarJobsFragment
     }
     buyerExtra {
       isPaymentMethodVerified
     }
   }
-}
-"""
+}"""
 
 def clean_text(text: str) -> str:
     if not text:
@@ -147,13 +356,17 @@ def format_budget(job_inner: dict) -> str:
 
 def get_experience_level(job_inner: dict) -> str:
     tier = job_inner.get("contractorTier")
-    if tier == 1:
+    if not tier:
+        return "Not specified"
+    
+    tier_str = str(tier).strip().upper()
+    if tier_str in ("1", "ENTRY"):
         return "Entry"
-    elif tier == 2:
+    elif tier_str in ("2", "INTERMEDIATE"):
         return "Intermediate"
-    elif tier == 3:
+    elif tier_str in ("3", "EXPERT"):
         return "Expert"
-    return "Not specified"
+    return tier_str.replace("_", " ").title()
 
 def clean_experience_level(raw_level: str) -> str:
     if not raw_level:
@@ -169,23 +382,37 @@ def get_job_duration(job_inner: dict) -> str:
         return fixed_dur.get("label", "Not specified")
     return "Not specified"
 
-def format_proposal_count(proposals_tier: str) -> str:
-    if not proposals_tier:
-        return "No Proposals yet"
-    tier = proposals_tier.upper().strip()
-    if "LESS_THAN_FIVE" in tier:
+def format_proposal_count(item: dict) -> str:
+    """Safely extracts the exact proposal range string provided by Upwork API."""
+    if not item:
         return "Less than 5"
-    elif "FIVE_TO_TEN" in tier:
-        return "5 to 10"
-    elif "TEN_TO_FIFTEEN" in tier:
-        return "10 to 15"
-    elif "FIFTEEN_TO_TWENTY" in tier:
-        return "15 to 20"
-    elif "TWENTY_TO_FIFTY" in tier:
-        return "20 to 50"
-    elif "FIFTY_OR_MORE" in tier or "FIFTY_PLUS" in tier:
-        return "50+"
-    return proposals_tier.replace("_", " ").title()
+
+    job_inner = item.get("jobTile", {}).get("job", {}) or {}
+    
+    # Check all possible key locations for proposal tiers
+    proposals_tier = (
+        item.get("proposalsTier") 
+        or job_inner.get("proposalsTier") 
+        or item.get("proposalsTierLabel")
+    )
+
+    if not proposals_tier:
+        return "Less than 5"
+
+    # Case 1: Dict payload structure (e.g. {'label': '10 to 15'})
+    if isinstance(proposals_tier, dict):
+        tier_str = proposals_tier.get("label") or proposals_tier.get("name") or ""
+    else:
+        tier_str = str(proposals_tier)
+
+    tier_clean = tier_str.strip()
+
+    if not tier_clean or tier_clean.upper() == "N/A":
+        return "Less than 5"
+
+    # Exact format mapping for display
+    return tier_clean
+
 
 async def post_with_exponential_backoff(url: str, headers: dict, payload: dict, max_retries: int = 3):
     """Executes requests.post with exponential backoff on network exceptions (2s, 4s, 8s)."""
@@ -267,7 +494,6 @@ async def fetch_target_jobs(query: str, headers: dict, auth_manager) -> tuple[li
         return [], headers
 
 async def fetch_job_details(ciphertext: str, headers: dict, auth_manager) -> dict | None:
-    """Fetches secondary client info (total spent, hire rate, member since, location)."""
     if not ciphertext:
         return None
     payload = {
@@ -277,8 +503,20 @@ async def fetch_job_details(ciphertext: str, headers: dict, auth_manager) -> dic
     try:
         response = await post_with_exponential_backoff(UPWORK_DETAILS_URL, headers, payload)
         if not response:
+            print(f"⚠️ [Details] No response object for ciphertext {ciphertext}.")
             return None
-        
+
+        # Check body for oauth permission errors before doing 401 refresh
+        try:
+            body = response.json()
+            if body.get("errors"):
+                err_msg = str(body["errors"])
+                if "permissions/scopes" in err_msg or "oauth2 permissions" in err_msg:
+                    print(f"ℹ️ [Details] Detailed stats are restricted for guest tokens. Using search results data.")
+                    return None
+        except Exception:
+            body = None
+
         if response.status_code == 401:
             print("⚠️ 401 Unauthorized inside job details module. Retrying refresh...")
             new_cookies, new_auth = await asyncio.to_thread(auth_manager.refresh_tokens, force=True)
@@ -288,12 +526,34 @@ async def fetch_job_details(ciphertext: str, headers: dict, auth_manager) -> dic
                 response = await post_with_exponential_backoff(UPWORK_DETAILS_URL, headers, payload)
                 if not response:
                     return None
+                try:
+                    body = response.json()
+                except Exception:
+                    body = None
             else:
                 return None
 
-        if response.status_code == 200:
-            return response.json().get("data", {}).get("jobPubDetails", {})
+        if response.status_code != 200:
+            print(f"❌ [Details] HTTP {response.status_code} for {ciphertext}")
+            return None
+
+        if not body:
+            try:
+                body = response.json()
+            except Exception:
+                return None
+
+        if body.get("errors"):
+            print(f"❌ [Details] GraphQL errors for {ciphertext}: {body['errors']}")
+
+        data = body.get("data")
+        if not data:
+            return None
+
+        job_pub_details = data.get("jobPubDetails")
+        return job_pub_details
+
     except Exception as e:
-        print(f"⚠️ Secondary API Details Request Failed: {e}")
+        print(f"⚠️ Secondary API Details Request Failed for {ciphertext}: {e}")
     return None
 

@@ -6,6 +6,9 @@ class JobDB:
 
     def __init__(self, path: str = "jobs.db"):
         self.conn = sqlite3.connect(path, check_same_thread=False)
+        # Enable WAL mode and set busy timeout to prevent database locks
+        self.conn.execute("PRAGMA journal_mode=WAL;")
+        self.conn.execute("PRAGMA busy_timeout = 30000;")
         self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS seen_jobs (
@@ -37,7 +40,7 @@ class JobDB:
 
     def mark_seen(self, job_id: str, url_source: str):
         self.conn.execute(
-            "INSERT INTO seen_jobs (job_id, url_source, first_seen) VALUES (?, ?, ?)",
+            "INSERT OR IGNORE INTO seen_jobs (job_id, url_source, first_seen) VALUES (?, ?, ?)",
             (job_id, url_source, datetime.now().isoformat()),
         )
         self.conn.commit()
@@ -100,6 +103,17 @@ class JobDB:
         if cursor.rowcount > 0:
             print(f"🧹 [Database] Cleaned up {cursor.rowcount} seen_jobs records older than {days} days.")
         return cursor.rowcount
+
+    def count_recent_jobs(self, hours: int = 1) -> int:
+        """Counts how many jobs were marked seen in the last specified hours."""
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) FROM seen_jobs
+            WHERE first_seen >= datetime('now', '-' || ? || ' hours')
+            """,
+            (hours,)
+        ).fetchone()
+        return row[0] if row else 0
 
     def close(self):
         self.conn.close()

@@ -49,6 +49,76 @@ from scraper import (
 )
 
 auth_manager = AuthManager()
+
+# ─── Uptime & Error Monitoring Dashboard ──────────────────────────────────────
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
+from datetime import datetime, timedelta
+
+bot_start_time = datetime.now()
+error_timestamps = []
+
+def log_error_event():
+    error_timestamps.append(datetime.now())
+
+def count_recent_errors():
+    global error_timestamps
+    one_hour_ago = datetime.now() - timedelta(hours=1)
+    error_timestamps = [t for t in error_timestamps if t >= one_hour_ago]
+    return len(error_timestamps)
+
+def calculate_uptime():
+    elapsed = datetime.now() - bot_start_time
+    return round(elapsed.total_seconds() / 3600, 2)
+
+def get_memory_usage():
+    try:
+        import psutil
+        process = psutil.Process(os.getpid())
+        return round(process.memory_info().rss / (1024 * 1024), 2)
+    except Exception:
+        return 0.0
+
+def last_refresh_time():
+    if auth_manager.token_timestamp:
+        return auth_manager.token_timestamp.strftime("%Y-%m-%d %H:%M:%S")
+    return "N/A"
+
+class StatusHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/status':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            
+            status_data = {
+                'uptime_hours': calculate_uptime(),
+                'jobs_posted_last_hour': db.count_recent_jobs(1),
+                'last_token_refresh': last_refresh_time(),
+                'memory_usage_mb': get_memory_usage(),
+                'active_urls': len(db.get_all_targets()),
+                'errors_last_hour': count_recent_errors()
+            }
+            self.wfile.write(json.dumps(status_data).encode('utf-8'))
+        else:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"Not Found")
+
+    def log_message(self, format, *args):
+        pass # Silence logging in console to keep terminal outputs clean
+
+def run_status_server():
+    try:
+        server = HTTPServer(('0.0.0.0', 5000), StatusHandler)
+        print("📊 [Monitoring] Status dashboard server started at http://localhost:5000/status")
+        server.serve_forever()
+    except Exception as e:
+        print(f"⚠️ [Monitoring] Failed to start status dashboard server: {e}")
+
+threading.Thread(target=run_status_server, daemon=True).start()
+
 load_dotenv()
 
 def load_config():
@@ -314,6 +384,7 @@ async def post_message_safely(destination, content=None, name=None, auto_archive
                 else:
                     return None
         except Exception as exc:
+            log_error_event()
             print(f"⚠️ Discord sending error: {exc}")
             return None
 async def scrape_single_target(target: dict):
@@ -372,7 +443,7 @@ async def scrape_single_target(target: dict):
         client_location = "Not specified"
         member_since = "Not specified"
         duration_str = get_job_duration(job_inner)
-        proposals = "N/A"
+        proposals = format_proposal_count(item)
         payment_status = "Unverified"
         skills_str = ", ".join([s.title() for s in skills_list]) if skills_list else "Not specified"
 
@@ -381,57 +452,56 @@ async def scrape_single_target(target: dict):
             print(f"🔍 Fetching deeper details for Job ID: {job_id} [{label}]...")
             details = await fetch_job_details(ciphertext, HEADERS, auth_manager)
             if details:
-                opening = details.get("opening", {})
-                buyer = details.get("buyer", {})
-                buyer_extra = details.get("buyerExtra", {})
+                opening = details.get("opening", {}) or {}
+                buyer = details.get("buyer", {}) or {}
+                buyer_extra = details.get("buyerExtra", {}) or {}
 
-                # Extract applicants / proposals
-                client_act = opening.get("clientActivity", {})
+        # Proposals — real number now, not a range
+                client_act = opening.get("clientActivity", {}) or {}
                 total_app = client_act.get("totalApplicants")
-                proposals = str(total_app) if total_app is not None else "0"
+                if total_app is not None:
+                    proposals = str(total_app)
 
-                # Extract Member Since (contractDate)
-                company = buyer.get("company", {})
-                contract_date = company.get("contractDate")
-                if contract_date:
-                    try:
-                        dt = datetime.fromisoformat(contract_date.replace("Z", "+00:00"))
-                        member_since = dt.strftime("%b %d, %Y")
-                    except Exception:
-                        member_since = contract_date.split("T")[0]
-
-                # Extract payment verification
+        # Payment verification
                 if buyer_extra.get("isPaymentMethodVerified"):
                     payment_status = "Payment Verified"
 
-                # Extract location
-                loc = buyer.get("location", {})
-                if loc and loc.get("country"):
+        # Client location
+                loc = buyer.get("location", {}) or {}
+                if loc.get("country"):
                     client_location = loc.get("country")
+                    if loc.get("city"):
+                        client_location = f"{loc.get('city')}, {client_location}"
 
-                # Extract buyer stats
-                stats = buyer.get("stats", {})
+        # Buyer stats
+                stats = buyer.get("stats", {}) or {}
                 if stats:
                     total_jobs = stats.get("totalAssignments") or 0
                     total_hires = stats.get("totalJobsWithHires") or 0
                     jobs_posted = str(total_jobs)
-
                     if total_jobs > 0:
-                        calculated_rate = round((total_hires / total_jobs) * 100)
-                        hire_rate_str = f"{calculated_rate}%"
-
-                    total_charges = stats.get("totalCharges", {})
-                    if total_charges and total_charges.get("amount") is not None:
+                        hire_rate_str = f"{round((total_hires / total_jobs) * 100)}%"
+                    total_charges = stats.get("totalCharges", {}) or {}
+                    if total_charges.get("amount") is not None:
                         spent_amount = total_charges.get("amount")
 
-                # Extract experience level from opening if available
+        # Member since
+                company = buyer.get("company", {}) or {}
+                contract_date = company.get("contractDate")
+                if contract_date:
+                    try:
+                        member_since = datetime.fromisoformat(contract_date.replace("Z", "+00:00")).strftime("%b %Y")
+                    except Exception:
+                        member_since = contract_date
+
+        # Experience level — string format from this endpoint, e.g. "INTERMEDIATE"
                 raw_exp = opening.get("contractorTier")
                 if raw_exp:
-                    exp_level = clean_experience_level(str(raw_exp))
+                    exp_level = str(raw_exp).replace("_", " ").title()
 
-                # Extract engagement duration
-                eng_dur = opening.get("engagementDuration", {})
-                if eng_dur and eng_dur.get("label"):
+        # Engagement duration
+                eng_dur = opening.get("engagementDuration", {}) or {}
+                if eng_dur.get("label"):
                     duration_str = eng_dur.get("label")
 
         short_desc = clean_text(item.get("description", "No Description"))[:200] + "..."
@@ -494,6 +564,7 @@ async def scrape_single_target(target: dict):
                 await post_message_safely(thread, content=thread_details)
             
         except Exception as thread_err:
+            log_error_event()
             print(f"⚠️ Thread content generation/sending failed: {thread_err}")
             
         db.mark_seen(job_id, label)
@@ -502,25 +573,29 @@ async def scrape_single_target(target: dict):
 
 @tasks.loop(seconds=30)
 async def job_scraper_loop():
-    print("\n📡 Loop Triggered: checking Upwork for tracked search targets (Concurrent)...")
-    check_memory_usage()
-    db.cleanup_old_jobs(days=30)
-    
-    if auth_manager.should_refresh():
-        print("⏰ Proactive timer condition met. Executing background refresh...")
-        new_cookies, new_auth = await asyncio.to_thread(auth_manager.refresh_tokens)
-        if new_cookies and new_auth:
-            HEADERS["cookie"] = new_cookies
-            HEADERS["authorization"] = new_auth
+    try:
+        print("\n📡 Loop Triggered: checking Upwork for tracked search targets (Concurrent)...")
+        check_memory_usage()
+        db.cleanup_old_jobs(days=30)
+        
+        if auth_manager.should_refresh():
+            print("⏰ Proactive timer condition met. Executing background refresh...")
+            new_cookies, new_auth = await asyncio.to_thread(auth_manager.refresh_tokens)
+            if new_cookies and new_auth:
+                HEADERS["cookie"] = new_cookies
+                HEADERS["authorization"] = new_auth
 
-    # Fetch tracked targets dynamically from SQLite Database
-    tracked_targets = db.get_all_targets()
+        # Fetch tracked targets dynamically from SQLite Database
+        tracked_targets = db.get_all_targets()
 
-    if tracked_targets:
-        tasks_list = [scrape_single_target(target) for target in tracked_targets]
-        await asyncio.gather(*tasks_list)
-    else:
-        print("ℹ️ No tracked targets found in SQLite database.")
+        if tracked_targets:
+            tasks_list = [scrape_single_target(target) for target in tracked_targets]
+            await asyncio.gather(*tasks_list)
+        else:
+            print("ℹ️ No tracked targets found in SQLite database.")
+    except Exception as e:
+        log_error_event()
+        print(f"❌ [Scraper Loop Error]: {e}")
 
 
 if __name__ == "__main__":
