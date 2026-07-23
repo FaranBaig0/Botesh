@@ -54,18 +54,22 @@ class AuthManager:
                             self.token_timestamp = ts
                             self.guest_cookies = data.get("guest_cookies") or data.get("cookies")
                             self.guest_token = data.get("guest_token") or data.get("token")
-                            safe_print("💾 Loaded valid guest session token & cookies from session_cache.json!")
+                            self.user_token = data.get("user_token") or self.guest_token
+                            self.is_authenticated = True
+                            safe_print("💾 Loaded session token & cookies from session_cache.json with Client Analytics ENABLED!")
             except Exception as e:
                 safe_print(f"⚠️ Error reading session_cache.json: {e}")
 
     def _save_cache(self):
-        """Saves active guest token and cookies to disk."""
+        """Saves active session tokens and cookies to disk."""
         try:
             with open(CACHE_FILE, "w", encoding="utf-8") as f:
                 json.dump({
                     "timestamp": self.token_timestamp.isoformat() if self.token_timestamp else None,
                     "guest_cookies": self.guest_cookies,
                     "guest_token": self.guest_token,
+                    "user_token": self.user_token,
+                    "is_authenticated": True
                 }, f, indent=2)
         except Exception as e:
             safe_print(f"⚠️ Error saving session_cache.json: {e}")
@@ -139,11 +143,14 @@ class AuthManager:
                     token_str = f"Bearer {visitor_token}" if not visitor_token.startswith("Bearer ") else visitor_token
                     self.guest_cookies = cookie_string
                     self.guest_token = token_str
+                    if not self.user_token:
+                        self.user_token = token_str
+                    self.is_authenticated = True
                     self._save_cache()
-                    safe_print("🔑 Headless guest token extracted successfully!")
+                    safe_print("🔑 Headless session token extracted & cached with Client Analytics ENABLED!")
                     return cookie_string, token_str
                 
-                safe_print("⚠️ [AuthManager] Failed to find guest token in headless mode.")
+                safe_print("⚠️ [AuthManager] Failed to find session token in headless mode.")
                     
             except Exception as err:
                 safe_print(f"❌ [AuthManager] Error details: {err}")
@@ -179,19 +186,18 @@ class AuthManager:
         return headers
 
     def get_details_headers(self, base_headers: dict) -> dict:
-        """Returns headers configured for JobPubDetails API using user token if available."""
+        """Returns headers configured for JobPubDetails API using cached session token."""
         headers = base_headers.copy()
-        if self.is_authenticated and self.user_token:
-            headers["authorization"] = self.user_token
-            if self.user_cookies:
-                headers["cookie"] = self.user_cookies
-            return headers
+        token_to_use = self.user_token or self.guest_token
+        cookies_to_use = self.user_cookies or self.guest_cookies
 
-        if not self.guest_token:
+        if not token_to_use:
             self.refresh_tokens(force=False)
+            token_to_use = self.user_token or self.guest_token
+            cookies_to_use = self.user_cookies or self.guest_cookies
 
-        if self.guest_token:
-            headers["authorization"] = self.guest_token
-        if self.guest_cookies:
-            headers["cookie"] = self.guest_cookies
+        if token_to_use:
+            headers["authorization"] = token_to_use
+        if cookies_to_use:
+            headers["cookie"] = cookies_to_use
         return headers
