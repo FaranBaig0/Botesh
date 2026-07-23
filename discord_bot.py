@@ -120,12 +120,16 @@ class StatusHandler(BaseHTTPRequestHandler):
         pass # Silence logging in console to keep terminal outputs clean
 
 def run_status_server():
-    try:
-        server = HTTPServer(('0.0.0.0', 5000), StatusHandler)
-        print("📊 [Monitoring] Status dashboard server started at http://localhost:5000/status")
-        server.serve_forever()
-    except Exception as e:
-        print(f"⚠️ [Monitoring] Failed to start status dashboard server: {e}")
+    for port in [5000, 5001, 5002, 5003]:
+        try:
+            server = HTTPServer(('0.0.0.0', port), StatusHandler)
+            print(f"📊 [Monitoring] Status dashboard server started at http://localhost:{port}/status")
+            server.serve_forever()
+            break
+        except OSError:
+            continue
+        except Exception:
+            break
 
 threading.Thread(target=run_status_server, daemon=True).start()
 
