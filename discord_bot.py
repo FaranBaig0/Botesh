@@ -443,46 +443,11 @@ async def post_message_safely(destination, content=None, name=None, auto_archive
             log_error_event()
             print(f"⚠️ Discord sending error: {exc}")
             return None
-async def scrape_single_target(target: dict):
-    global HEADERS
-    label = target.get("label", target.get("userQuery", "default"))
-    query = target.get("userQuery", SEARCH_TERM)
-    channel_id = target.get("channel_id", CHANNEL_ID)
-
-    channel = bot.get_channel(channel_id)
-    if not channel:
-        print(f"❌ Error: Channel ID {channel_id} for target '{label}' not found.")
-        return
-
-    print(f"🔍 [Concurrent] Processing Target: [{label}] (Query: '{query}') -> Channel: {channel_id}")
-
-    # Fetch jobs via scraper engine
-    jobs, HEADERS = await fetch_target_jobs(query, HEADERS, auth_manager)
-    if not jobs:
-        return
-
-    print(f"✅ [{label}] Fetched {len(jobs)} jobs. Checking for new ones...")
-
-    for item in reversed(jobs):
-        job_id = item.get("id", "N/A")
-
-        if not db.is_new(job_id, label):
-            continue
-
+async def process_and_post_job(channel, item, details, label, job_id, skills_list):
+    try:
         clean_title = clean_text(item.get("title", "No Title"))
         full_desc = clean_text(item.get("description", ""))
-        skills_list = [skill.get('prefLabel', '').lower() for skill in item.get('ontologySkills', []) if skill.get('prefLabel')]
-
-        # Strict keyword matching: Ensure query terms exist in Title, Description, or Skills
-        query_terms = [t.strip().lower() for t in query.split() if t.strip()]
-        searchable_text = f"{clean_title.lower()} {full_desc.lower()} {' '.join(skills_list)}"
         
-        matches_all = all(re.search(r'\b' + re.escape(term) + r'\b', searchable_text) for term in query_terms)
-        if not matches_all:
-            print(f"⏭️ Skipping Job ID {job_id} [{label}]: Strict keyword terms '{query}' not matched.")
-            db.mark_seen(job_id, label)
-            continue
-
         job_inner = item.get("jobTile", {}).get("job", {})
         ciphertext = job_inner.get("ciphertext", "")
         job_url = f"https://www.upwork.com/jobs/{ciphertext}" if ciphertext else "https://www.upwork.com"
@@ -495,6 +460,7 @@ async def scrape_single_target(target: dict):
         # Default fallback values for secondary details
         spent_amount = 0
         jobs_posted = "N/A"
+        final_hire_rate = "Unknown"
         hire_rate_str = "N/A"
         client_location = "Not specified"
         member_since = "Not specified"
@@ -503,8 +469,9 @@ async def scrape_single_target(target: dict):
         payment_status = "Unverified"
         skills_str = ", ".join([s.title() for s in skills_list]) if skills_list else "Not specified"
 
-        # Fetch secondary client info
-        if ciphertext:
+        # Fetch secondary details if not provided
+        if details is None and ciphertext:
+            global HEADERS
             print(f"🔍 Fetching deeper details for Job ID: {job_id} [{label}]...")
             details = await fetch_job_details(ciphertext, HEADERS, auth_manager)
 
@@ -597,7 +564,7 @@ async def scrape_single_target(target: dict):
         main_message = await post_message_safely(channel, content=main_message_text)
         if not main_message:
             print(f"❌ Failed to send main job message for Job ID {job_id}.")
-            continue
+            return
             
         await asyncio.sleep(0.8)  # Delay between main message and thread creation
 
@@ -612,7 +579,6 @@ async def scrape_single_target(target: dict):
                 else:
                     truncated_desc = full_desc
 
-                final_hire_rate = "Unknown"
                 if hire_rate_str and hire_rate_str != "Unknown":
                     final_hire_rate = hire_rate_str if "%" in str(hire_rate_str) else f"{hire_rate_str}%"
 
@@ -650,11 +616,16 @@ async def scrape_single_target(target: dict):
         db.mark_seen(job_id, label)
         await asyncio.sleep(1.2)  # Delay before processing next job in channel
 
+    except Exception as exc:
+        log_error_event()
+        print(f"⚠️ process_and_post_job Error for Job ID {job_id}: {exc}")
+
 
 @tasks.loop(seconds=30)
 async def job_scraper_loop():
+    global HEADERS
     try:
-        print("\n📡 Loop Triggered: checking Upwork for tracked search targets (Concurrent)...")
+        print("\n📡 Loop Triggered: checking Upwork for tracked search targets (Pooled)...")
         check_memory_usage()
         db.cleanup_old_jobs(days=30)
         
@@ -664,15 +635,76 @@ async def job_scraper_loop():
 
         # Fetch tracked targets dynamically from SQLite Database
         tracked_targets = db.get_all_targets()
-
-        if tracked_targets:
-            tasks_list = [scrape_single_target(target) for target in tracked_targets]
-            await asyncio.gather(*tasks_list)
-        else:
+        if not tracked_targets:
             print("ℹ️ No tracked targets found in SQLite database.")
+            return
+
+        # Step 1: Fetch jobs for all queries concurrently
+        fetch_tasks = []
+        for target in tracked_targets:
+            query = target.get("userQuery", SEARCH_TERM)
+            fetch_tasks.append(fetch_target_jobs(query, HEADERS, auth_manager))
+
+        results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+
+        # Step 2: Combine all jobs into a unique pool by job_id and update headers
+        unique_jobs = {}
+        for res in results:
+            if isinstance(res, tuple) and len(res) == 2:
+                jobs_list, updated_headers = res
+                if updated_headers:
+                    HEADERS.update(updated_headers)
+                for item in jobs_list:
+                    job_id = item.get("id")
+                    if job_id and job_id not in unique_jobs:
+                        unique_jobs[job_id] = item
+
+        if not unique_jobs:
+            return
+
+        # Step 3: For each unique job, evaluate against all targets
+        for job_id, item in unique_jobs.items():
+            clean_title = clean_text(item.get("title", "No Title"))
+            full_desc = clean_text(item.get("description", ""))
+            skills_list = [skill.get('prefLabel', '').lower() for skill in item.get('ontologySkills', []) if skill.get('prefLabel')]
+            searchable_text = f"{clean_title.lower()} {full_desc.lower()} {' '.join(skills_list)}"
+
+            # Find matching targets where this job is new
+            matching_targets = []
+            for target in tracked_targets:
+                label = target["label"]
+                query = target["userQuery"]
+                query_terms = [t.strip().lower() for t in query.split() if t.strip()]
+                matches_all = all(re.search(r'\b' + re.escape(term) + r'\b', searchable_text) for term in query_terms)
+                
+                if matches_all and db.is_new(job_id, label):
+                    matching_targets.append(target)
+
+            if not matching_targets:
+                continue
+
+            # Fetch details once for this job, then post to all matching channels
+            job_inner = item.get("jobTile", {}).get("job", {})
+            ciphertext = job_inner.get("ciphertext", "")
+            
+            details = None
+            if ciphertext:
+                print(f"🔍 Fetching deeper details for Job ID: {job_id} once for targets: {[t['label'] for t in matching_targets]}")
+                details = await fetch_job_details(ciphertext, HEADERS, auth_manager)
+
+            # Post to each matching target channel
+            for target in matching_targets:
+                channel_id = target["channel_id"]
+                label = target["label"]
+                channel = bot.get_channel(channel_id)
+                if channel:
+                    print(f"📤 Posting Job ID {job_id} to channel #{channel.name} [{label}]")
+                    await process_and_post_job(channel, item, details, label, job_id, skills_list)
+
     except Exception as e:
         log_error_event()
         print(f"❌ [Scraper Loop Error]: {e}")
+
 
 
 if __name__ == "__main__":
