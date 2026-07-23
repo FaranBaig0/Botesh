@@ -94,54 +94,78 @@ class AuthManager:
                 if self.guest_cookies and self.guest_token:
                     return self.guest_cookies, self.guest_token
 
-            safe_print("🔄 [AuthManager] Launching Headless SeleniumBase session for guest token...")
+            safe_print("🔄 [AuthManager] Launching Headless visitor session for guest token...")
 
-            # Clean up lingering driver processes to prevent profile locks
             if os.name == "nt":
                 try:
                     os.system("taskkill /f /im chromedriver.exe >nul 2>&1")
                     os.system("taskkill /f /im chrome.exe >nul 2>&1")
                 except Exception:
                     pass
-
-            driver = None
+            display = None
+            page = None
             try:
-                from seleniumbase import Driver
-                # No selenium_profile needed - pure visitor session
-                driver = Driver(uc=True, headless=True)
+                import platform
+                if platform.system().lower() == "linux":
+                    try:
+                        from pyvirtualdisplay import Display
+                        safe_print("🖥️ [AuthManager] Starting virtual framebuffer (Xvfb) for headful browser...")
+                        display = Display(visible=0, size=(1280, 1024))
+                        display.start()
+                    except Exception as e:
+                        safe_print(f"⚠️ [AuthManager] Failed to start virtual display: {e}")
 
-                # Step 1: Visit homepage to get base cookies
-                driver.uc_open("https://www.upwork.com/")
-                time.sleep(2)
-
-                # Step 2: Visit a job details page to trigger JobDetailsNuxt_vt generation
-                driver.uc_open("https://www.upwork.com/nx/search/jobs/details/~022080259272497837564")
-                time.sleep(3)
-
-                selenium_cookies = driver.get_cookies()
-                cookie_string = "; ".join([f"{c['name']}={c['value']}" for c in selenium_cookies])
-
-                # Priority: JobDetailsNuxt_vt > UniversalSearchNuxt_vt > visitor_gql_token
-                visitor_token = None
-                for priority_name in ['JobDetailsNuxt_vt', 'UniversalSearchNuxt_vt', 'visitor_gql_token']:
-                    for c in selenium_cookies:
-                        if c.get('name') == priority_name and c.get('value'):
-                            visitor_token = c['value']
-                            safe_print(f"🔑 Extracted {priority_name} from job details page!")
-                            break
-                    if visitor_token:
+                from DrissionPage import ChromiumPage, ChromiumOptions
+                co = ChromiumOptions()
+                co.headless(False) # Must be False to solve/bypass Turnstile checkbox
+                co.set_argument('--no-sandbox')
+                co.set_argument('--disable-gpu')
+                # Add default user agent to ensure consistency
+                co.set_user_agent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+                
+                page = ChromiumPage(co)
+                safe_print("🔄 [AuthManager] Visiting Upwork job details page to extract tokens...")
+                page.get("https://www.upwork.com/nx/search/jobs/details/~022080259272497837564")
+                
+                best_token = None
+                cookie_string = ""
+                
+                # Check up to 10 times (15 seconds total)
+                for idx in range(10):
+                    time.sleep(1.5)
+                    if "Just a moment" in page.title:
+                        try:
+                            # Automatically solve Turnstile checkbox
+                            iframe = page.get_frame('xpath://iframe[contains(@src, "cloudflare") or contains(@src, "turnstile")]')
+                            if iframe:
+                                checkbox = iframe.ele('span.mark') or iframe.ele('.checkbox') or iframe.ele('#challenge-stage')
+                                if checkbox:
+                                    safe_print("🤖 [AuthManager] Solving Turnstile checkbox...")
+                                    checkbox.click()
+                        except Exception:
+                            pass
+                            
+                    cookies = page.cookies()
+                    all_c = {c.get('name'): c.get('value') for c in cookies}
+                    
+                    token_val = all_c.get('UniversalSearchNuxt_vt') or all_c.get('JobDetailsNuxt_vt') or all_c.get('visitor_gql_token')
+                    if token_val and ('UniversalSearchNuxt_vt' in all_c or 'JobDetailsNuxt_vt' in all_c):
+                        best_token = token_val
+                        cookie_string = "; ".join([f"{k}={v}" for k, v in all_c.items()])
+                        safe_print(f"🔑 Bypassed Cloudflare! Extracted Nuxt token on attempt {idx+1}")
                         break
 
-                if not visitor_token:
-                    # Fallback: any oauth2v2_ token
-                    for c in selenium_cookies:
-                        if 'oauth2v2_' in c.get('value', ''):
-                            visitor_token = c['value']
-                            break
+                if not best_token and cookies:
+                    # Fallback to visitor_gql_token if no Nuxt token generated
+                    all_c = {c.get('name'): c.get('value') for c in cookies}
+                    best_token = all_c.get('visitor_gql_token')
+                    cookie_string = "; ".join([f"{k}={v}" for k, v in all_c.items()])
+                    if best_token:
+                        safe_print("🔑 Found visitor_gql_token only.")
 
-                if visitor_token:
+                if best_token:
                     self.token_timestamp = datetime.now()
-                    token_str = f"Bearer {visitor_token}" if not visitor_token.startswith("Bearer ") else visitor_token
+                    token_str = f"Bearer {best_token}" if not best_token.startswith("Bearer ") else best_token
                     self.guest_cookies = cookie_string
                     self.guest_token = token_str
                     self.user_token = token_str
@@ -156,12 +180,17 @@ class AuthManager:
             except Exception as err:
                 safe_print(f"❌ [AuthManager] Error details: {err}")
             finally:
-                if driver:
+                if page:
                     try:
-                        driver.quit()
+                        page.quit()
                     except Exception:
                         pass
-                    time.sleep(1.5)
+                if display:
+                    try:
+                        display.stop()
+                    except Exception:
+                        pass
+                time.sleep(1.5)
 
             return None, None
 

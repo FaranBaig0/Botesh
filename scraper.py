@@ -493,12 +493,10 @@ async def fetch_job_details(ciphertext: str, headers: dict, auth_manager) -> dic
     if not ciphertext:
         return None
 
-    # isLoggedIn: False allows visitor tokens to fetch buyer details (location, stats, payment)
-    # isLoggedIn: True is only needed for extra fields like attachments, open job list
-    is_logged_in = getattr(auth_manager, "is_authenticated", False)
+    # isLoggedIn must be True for Upwork to return location, stats, and payment verification status
     payload = {
         "query": JOB_DETAILS_QUERY,
-        "variables": {"id": ciphertext, "isLoggedIn": is_logged_in}
+        "variables": {"id": ciphertext, "isLoggedIn": True}
     }
     details_headers = auth_manager.get_details_headers(headers)
     details_headers["referer"] = f"https://www.upwork.com/nx/search/jobs/details/{ciphertext}"
