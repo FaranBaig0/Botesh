@@ -493,6 +493,8 @@ async def fetch_job_details(ciphertext: str, headers: dict, auth_manager) -> dic
     if not ciphertext:
         return None
 
+    # isLoggedIn: False allows visitor tokens to fetch buyer details (location, stats, payment)
+    # isLoggedIn: True is only needed for extra fields like attachments, open job list
     is_logged_in = getattr(auth_manager, "is_authenticated", False)
     payload = {
         "query": JOB_DETAILS_QUERY,
@@ -530,14 +532,15 @@ async def fetch_job_details(ciphertext: str, headers: dict, auth_manager) -> dic
         if not body or not isinstance(body, dict):
             return None
 
+        # Always try to extract data first, even if errors are present
         data = body.get("data")
         if data and isinstance(data, dict):
             job_pub_details = data.get("jobPubDetails")
             if job_pub_details and isinstance(job_pub_details, dict):
                 return job_pub_details
 
-        # Log informative note if guest mode restrictions prevented full data
-        if body.get("errors"):
+        # Only log error if data was truly empty (not just partial)
+        if body.get("errors") and not data:
             err_msg = str(body["errors"])
             if "permissions/scopes" in err_msg or "oauth2 permissions" in err_msg:
                 print("ℹ️ [Details] Upwork restricts detailed buyer stats for guest tokens. Use an authenticated user bearer token in .env for full client analytics.")

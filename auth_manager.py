@@ -107,53 +107,52 @@ class AuthManager:
             driver = None
             try:
                 from seleniumbase import Driver
-                profile_dir = os.path.abspath("selenium_profile")
-                driver = Driver(uc=True, user_data_dir=profile_dir, headless=True)
+                # No selenium_profile needed - pure visitor session
+                driver = Driver(uc=True, headless=True)
+
+                # Step 1: Visit homepage to get base cookies
                 driver.uc_open("https://www.upwork.com/")
+                time.sleep(2)
 
-                cookie_string = ""
+                # Step 2: Visit a job details page to trigger JobDetailsNuxt_vt generation
+                driver.uc_open("https://www.upwork.com/nx/search/jobs/details/~022080259272497837564")
+                time.sleep(3)
+
+                selenium_cookies = driver.get_cookies()
+                cookie_string = "; ".join([f"{c['name']}={c['value']}" for c in selenium_cookies])
+
+                # Priority: JobDetailsNuxt_vt > UniversalSearchNuxt_vt > visitor_gql_token
                 visitor_token = None
-
-                # Fast polling loop: check cookies every 0.4s up to 15 times
-                for _ in range(15):
-                    selenium_cookies = driver.get_cookies()
-                    cookie_string = "; ".join([f"{c['name']}={c['value']}" for c in selenium_cookies])
-
+                for priority_name in ['JobDetailsNuxt_vt', 'UniversalSearchNuxt_vt', 'visitor_gql_token']:
                     for c in selenium_cookies:
-                        name = c.get('name', '')
-                        val = c.get('value', '')
-                        if (name == 'visitor_gql_token' or name == 'UniversalSearchNuxt_vt') and val:
-                            visitor_token = val
+                        if c.get('name') == priority_name and c.get('value'):
+                            visitor_token = c['value']
+                            safe_print(f"🔑 Extracted {priority_name} from job details page!")
                             break
-                        if 'oauth2v2_' in val and not visitor_token:
-                            visitor_token = val
-                            break
-
                     if visitor_token:
-                        time.sleep(1.5)  # Brief pause to ensure token activation on Upwork backend
                         break
-                    time.sleep(0.4)
 
                 if not visitor_token:
-                    try:
-                        visitor_token = driver.execute_script("return localStorage.getItem('visitor_gql_token') || localStorage.getItem('oauth2_access_token');")
-                    except Exception:
-                        pass
+                    # Fallback: any oauth2v2_ token
+                    for c in selenium_cookies:
+                        if 'oauth2v2_' in c.get('value', ''):
+                            visitor_token = c['value']
+                            break
 
                 if visitor_token:
                     self.token_timestamp = datetime.now()
                     token_str = f"Bearer {visitor_token}" if not visitor_token.startswith("Bearer ") else visitor_token
                     self.guest_cookies = cookie_string
                     self.guest_token = token_str
-                    if force or not self.user_token:
-                        self.user_token = token_str
+                    self.user_token = token_str
+                    self.user_cookies = cookie_string
                     self.is_authenticated = True
                     self._save_cache()
-                    safe_print("🔑 Headless session token extracted & cached with Client Analytics ENABLED!")
+                    safe_print("🔑 Headless visitor token extracted & cached! Client details ENABLED without login!")
                     return cookie_string, token_str
-                
-                safe_print("⚠️ [AuthManager] Failed to find session token in headless mode.")
-                    
+
+                safe_print("⚠️ [AuthManager] Failed to find visitor token in headless mode.")
+
             except Exception as err:
                 safe_print(f"❌ [AuthManager] Error details: {err}")
             finally:
@@ -163,6 +162,7 @@ class AuthManager:
                     except Exception:
                         pass
                     time.sleep(1.5)
+
             return None, None
 
     def get_search_headers(self, base_headers: dict) -> dict:
@@ -189,14 +189,12 @@ class AuthManager:
 
     def get_details_headers(self, base_headers: dict) -> dict:
         """Returns headers configured for JobPubDetails API using cached session token."""
+        if not self.user_token or self.should_refresh():
+            self.refresh_tokens(force=False)
+
         headers = base_headers.copy()
         token_to_use = self.user_token or self.guest_token
         cookies_to_use = self.user_cookies or self.guest_cookies
-
-        if not token_to_use:
-            self.refresh_tokens(force=False)
-            token_to_use = self.user_token or self.guest_token
-            cookies_to_use = self.user_cookies or self.guest_cookies
 
         if token_to_use:
             headers["authorization"] = token_to_use
