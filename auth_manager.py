@@ -29,20 +29,7 @@ class AuthManager:
         self._load_env_or_cache()
 
     def _load_env_or_cache(self):
-        """Loads user bearer token from environment and cached guest tokens from disk."""
-        env_token = os.getenv("UPWORK_BEARER_TOKEN")
-        env_cookies = os.getenv("UPWORK_COOKIES")
-
-        if env_token and env_token.strip():
-            token_str = env_token.strip()
-            if not token_str.startswith("Bearer "):
-                token_str = f"Bearer {token_str}"
-            self.user_token = token_str
-            self.user_cookies = env_cookies or ""
-            self.is_authenticated = True
-            safe_print("🔑 [AuthManager] Loaded user UPWORK_BEARER_TOKEN from environment. Authenticated client analytics ENABLED!")
-            return
-
+        """Loads active session token and cookies from session_cache.json or environment."""
         if os.path.exists(CACHE_FILE):
             try:
                 with open(CACHE_FILE, "r", encoding="utf-8") as f:
@@ -55,10 +42,25 @@ class AuthManager:
                             self.guest_cookies = data.get("guest_cookies") or data.get("cookies")
                             self.guest_token = data.get("guest_token") or data.get("token")
                             self.user_token = data.get("user_token") or self.guest_token
+                            self.user_cookies = data.get("user_cookies") or self.guest_cookies
                             self.is_authenticated = True
-                            safe_print("💾 Loaded session token & cookies from session_cache.json with Client Analytics ENABLED!")
+                            safe_print("💾 Loaded session token & cookies from session_cache.json! Client Analytics ENABLED!")
+                            return
             except Exception as e:
                 safe_print(f"⚠️ Error reading session_cache.json: {e}")
+
+        env_token = os.getenv("UPWORK_BEARER_TOKEN")
+        env_cookies = os.getenv("UPWORK_COOKIES")
+
+        if env_token and env_token.strip():
+            token_str = env_token.strip()
+            if not token_str.startswith("Bearer "):
+                token_str = f"Bearer {token_str}"
+            self.user_token = token_str
+            self.user_cookies = env_cookies or ""
+            self.is_authenticated = True
+            safe_print("🔑 [AuthManager] Loaded user UPWORK_BEARER_TOKEN from environment. Authenticated client analytics ENABLED!")
+            return
 
     def _save_cache(self):
         """Saves active session tokens and cookies to disk."""
