@@ -120,7 +120,7 @@ class StatusHandler(BaseHTTPRequestHandler):
         pass # Silence logging in console to keep terminal outputs clean
 
 def run_status_server():
-    for port in [5000, 5001, 5002, 5003]:
+    for port in [8080, 8000, 5000, 5001, 5002, 5003]:
         try:
             server = HTTPServer(('0.0.0.0', port), StatusHandler)
             print(f"📊 [Monitoring] Status dashboard server started at http://localhost:{port}/status")
