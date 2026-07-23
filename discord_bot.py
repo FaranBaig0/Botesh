@@ -282,7 +282,47 @@ async def search_command(ctx, *, query: str):
 
 
 
+@bot.command(name="settoken")
+async def set_token_command(ctx, *, token: str = None):
+    """Command: !settoken <bearer_token> -> Updates session_cache.json with a new token for client analytics."""
+    if not token or not token.strip():
+        await ctx.send("❌ Usage: `!settoken oauth2v2_int_xxxxx`\nCopy your `UniversalSearchNuxt_vt` cookie value from Chrome DevTools (F12 → Application → Cookies → upwork.com) and paste it here.")
+        return
+
+    token = token.strip()
+    if token.startswith("Bearer "):
+        token = token[7:]
+
+    import json
+    from datetime import datetime
+
+    cache_file = "session_cache.json"
+    existing = {}
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        except Exception:
+            existing = {}
+
+    existing["user_token"] = f"Bearer {token}"
+    existing["guest_token"] = f"Bearer {token}"
+    existing["is_authenticated"] = True
+    existing["timestamp"] = datetime.now().isoformat()
+
+    with open(cache_file, "w", encoding="utf-8") as f:
+        json.dump(existing, f, indent=2)
+
+    # Update live auth_manager in memory too
+    auth_manager.user_token = f"Bearer {token}"
+    auth_manager.guest_token = f"Bearer {token}"
+    auth_manager.is_authenticated = True
+
+    await ctx.send(f"✅ Token updated successfully! Client analytics are now **ENABLED**.\n🔑 Token: `{token[:30]}...`")
+
+
 @bot.command(name="delete")
+
 async def delete_channel_command(ctx, *, channel_name: str = None):
     """Command: !delete [channel_name] -> Deletes specified channel or current channel if omitted."""
     guild = ctx.guild
