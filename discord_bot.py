@@ -366,6 +366,8 @@ async def list_targets_command(ctx):
         qry = t.get("userQuery")
         msg_lines.append(f"• <#{cid}> | **{lbl}** (`{qry}`)")
     
+    await ctx.send("\n".join(msg_lines))
+    
 import psutil
 
 def check_memory_usage():
