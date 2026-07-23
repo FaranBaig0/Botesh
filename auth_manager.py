@@ -3,21 +3,46 @@ import time
 import json
 import threading
 from datetime import datetime, timedelta
-from seleniumbase import Driver
+from dotenv import load_dotenv
 
 CACHE_FILE = "session_cache.json"
+load_dotenv()
+
+def safe_print(msg: str):
+    """Safely print messages handling Windows CP1252 character encoding gracefully."""
+    try:
+        print(msg)
+    except UnicodeEncodeError:
+        safe_msg = msg.encode("ascii", "ignore").decode("ascii")
+        print(safe_msg)
 
 class AuthManager:
     def __init__(self):
         self.token_timestamp = None
         self.token_lifetime = timedelta(hours=11)
-        self.last_cookies = None
-        self.last_token = None
+        self.guest_cookies = None
+        self.guest_token = None
+        self.user_token = None
+        self.user_cookies = None
+        self.is_authenticated = False
         self.lock = threading.Lock()
-        self._load_cache()
+        self._load_env_or_cache()
 
-    def _load_cache(self):
-        """Loads cached token and cookies from disk on startup if still valid."""
+    def _load_env_or_cache(self):
+        """Loads user bearer token from environment and cached guest tokens from disk."""
+        env_token = os.getenv("UPWORK_BEARER_TOKEN")
+        env_cookies = os.getenv("UPWORK_COOKIES")
+
+        if env_token and env_token.strip():
+            token_str = env_token.strip()
+            if not token_str.startswith("Bearer "):
+                token_str = f"Bearer {token_str}"
+            self.user_token = token_str
+            self.user_cookies = env_cookies or ""
+            self.is_authenticated = True
+            safe_print("🔑 [AuthManager] Loaded user UPWORK_BEARER_TOKEN from environment. Authenticated client analytics ENABLED!")
+            return
+
         if os.path.exists(CACHE_FILE):
             try:
                 with open(CACHE_FILE, "r", encoding="utf-8") as f:
@@ -27,28 +52,26 @@ class AuthManager:
                         ts = datetime.fromisoformat(ts_str)
                         if datetime.now() - ts < self.token_lifetime:
                             self.token_timestamp = ts
-                            self.last_cookies = data.get("cookies")
-                            self.last_token = data.get("token")
-                            print("💾 Loaded valid session token & cookies from session_cache.json!")
-                        else:
-                            print("⌛ Cached session in session_cache.json has expired.")
+                            self.guest_cookies = data.get("guest_cookies") or data.get("cookies")
+                            self.guest_token = data.get("guest_token") or data.get("token")
+                            safe_print("💾 Loaded valid guest session token & cookies from session_cache.json!")
             except Exception as e:
-                print(f"⚠️ Error reading session_cache.json: {e}")
+                safe_print(f"⚠️ Error reading session_cache.json: {e}")
 
     def _save_cache(self):
-        """Saves active token and cookies to disk."""
+        """Saves active guest token and cookies to disk."""
         try:
             with open(CACHE_FILE, "w", encoding="utf-8") as f:
                 json.dump({
                     "timestamp": self.token_timestamp.isoformat() if self.token_timestamp else None,
-                    "cookies": self.last_cookies,
-                    "token": self.last_token
+                    "guest_cookies": self.guest_cookies,
+                    "guest_token": self.guest_token,
                 }, f, indent=2)
         except Exception as e:
-            print(f"⚠️ Error saving session_cache.json: {e}")
+            safe_print(f"⚠️ Error saving session_cache.json: {e}")
 
     def should_refresh(self) -> bool:
-        if not self.token_timestamp:
+        if not self.token_timestamp or not self.guest_token:
             return True
         elapsed = datetime.now() - self.token_timestamp
         return elapsed >= self.token_lifetime
@@ -57,17 +80,15 @@ class AuthManager:
         with self.lock:
             # If token was refreshed in the last 15 seconds by a concurrent target, ALWAYS reuse it!
             if self.token_timestamp and (datetime.now() - self.token_timestamp).total_seconds() < 15:
-                if self.last_cookies and self.last_token:
-                    print("ℹ️ Token was recently refreshed by concurrent target. Reusing fresh token.")
-                    return self.last_cookies, self.last_token
+                if self.guest_cookies and self.guest_token:
+                    return self.guest_cookies, self.guest_token
 
             # If not forced and token was refreshed in the last 60 seconds, reuse it!
             if not force and self.token_timestamp and (datetime.now() - self.token_timestamp).total_seconds() < 60:
-                if self.last_cookies and self.last_token:
-                    print("ℹ️ Token was recently refreshed. Reusing cached token.")
-                    return self.last_cookies, self.last_token
+                if self.guest_cookies and self.guest_token:
+                    return self.guest_cookies, self.guest_token
 
-            print("🔄 [AuthManager] Launching Headless SeleniumBase session for guest token...")
+            safe_print("🔄 [AuthManager] Launching Headless SeleniumBase session for guest token...")
 
             # Clean up lingering driver processes to prevent profile locks
             if os.name == "nt":
@@ -79,7 +100,9 @@ class AuthManager:
 
             driver = None
             try:
-                driver = Driver(uc=True, headless=True)
+                from seleniumbase import Driver
+                profile_dir = os.path.abspath("selenium_profile")
+                driver = Driver(uc=True, user_data_dir=profile_dir, headless=True)
                 driver.uc_open("https://www.upwork.com/")
 
                 cookie_string = ""
@@ -90,19 +113,18 @@ class AuthManager:
                     selenium_cookies = driver.get_cookies()
                     cookie_string = "; ".join([f"{c['name']}={c['value']}" for c in selenium_cookies])
 
-                    # 1. Look for visitor_gql_token, UniversalSearchNuxt_vt or oauth2v2 token
                     for c in selenium_cookies:
                         name = c.get('name', '')
                         val = c.get('value', '')
                         if (name == 'visitor_gql_token' or name == 'UniversalSearchNuxt_vt') and val:
                             visitor_token = val
                             break
-                        if 'oauth2v2_' in val:
+                        if 'oauth2v2_' in val and not visitor_token:
                             visitor_token = val
                             break
 
                     if visitor_token:
-                        time.sleep(2.0)  # Brief pause to ensure token activation on Upwork backend
+                        time.sleep(1.5)  # Brief pause to ensure token activation on Upwork backend
                         break
                     time.sleep(0.4)
 
@@ -115,21 +137,61 @@ class AuthManager:
                 if visitor_token:
                     self.token_timestamp = datetime.now()
                     token_str = f"Bearer {visitor_token}" if not visitor_token.startswith("Bearer ") else visitor_token
-                    self.last_cookies = cookie_string
-                    self.last_token = token_str
-                    self._save_cache()  # Save to disk for instant bot restarts
-                    print("🔑 Headless guest token extracted successfully!")
+                    self.guest_cookies = cookie_string
+                    self.guest_token = token_str
+                    self._save_cache()
+                    safe_print("🔑 Headless guest token extracted successfully!")
                     return cookie_string, token_str
                 
-                print("⚠️ [AuthManager] Failed to find visitor token in headless mode.")
+                safe_print("⚠️ [AuthManager] Failed to find guest token in headless mode.")
                     
             except Exception as err:
-                print(f"❌ [AuthManager] Error details: {err}")
+                safe_print(f"❌ [AuthManager] Error details: {err}")
             finally:
                 if driver:
                     try:
                         driver.quit()
                     except Exception:
                         pass
-                    time.sleep(1.5)  # Allow process and port to release cleanly
+                    time.sleep(1.5)
             return None, None
+
+    def get_search_headers(self, base_headers: dict) -> dict:
+        """Returns headers specifically configured for visitorJobSearchV1 API."""
+        if not self.guest_token or self.should_refresh():
+            self.refresh_tokens(force=False)
+        
+        headers = base_headers.copy()
+        
+        # Extract visitor_gql_token from guest_cookies if available for search authorization
+        visitor_token = None
+        if self.guest_cookies:
+            for part in self.guest_cookies.split(";"):
+                if "visitor_gql_token=" in part or "UniversalSearchNuxt_vt=" in part:
+                    visitor_token = part.split("=")[1].strip()
+                    break
+
+        search_auth = f"Bearer {visitor_token}" if visitor_token else (self.guest_token or "")
+        if search_auth:
+            headers["authorization"] = search_auth
+        if self.guest_cookies:
+            headers["cookie"] = self.guest_cookies
+        return headers
+
+    def get_details_headers(self, base_headers: dict) -> dict:
+        """Returns headers configured for JobPubDetails API using user token if available."""
+        headers = base_headers.copy()
+        if self.is_authenticated and self.user_token:
+            headers["authorization"] = self.user_token
+            if self.user_cookies:
+                headers["cookie"] = self.user_cookies
+            return headers
+
+        if not self.guest_token:
+            self.refresh_tokens(force=False)
+
+        if self.guest_token:
+            headers["authorization"] = self.guest_token
+        if self.guest_cookies:
+            headers["cookie"] = self.guest_cookies
+        return headers

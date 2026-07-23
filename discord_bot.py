@@ -6,14 +6,24 @@ import json
 import asyncio
 from datetime import datetime
 
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+except Exception:
+    pass
+
 class LoggerTee:
     """Redirects stdout & stderr so everything printed in terminal is also written to bot.log with timestamps."""
-    def __init__(self, filename="bot.log"):
-        self.terminal = sys.stdout
+    def __init__(self, filename="bot.log", stream=None):
+        self.terminal = stream or sys.stdout
         self.log_file = open(filename, "a", encoding="utf-8")
 
     def write(self, message):
-        self.terminal.write(message)
+        try:
+            self.terminal.write(message)
+        except UnicodeEncodeError:
+            safe_msg = message.encode("ascii", "ignore").decode("ascii")
+            self.terminal.write(safe_msg)
         if message.strip():
             timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S] ")
             if not message.startswith("["):
@@ -26,8 +36,8 @@ class LoggerTee:
         self.terminal.flush()
         self.log_file.flush()
 
-sys.stdout = LoggerTee("bot.log")
-sys.stderr = LoggerTee("bot.log")
+sys.stdout = LoggerTee("bot.log", sys.stdout)
+sys.stderr = LoggerTee("bot.log", sys.stderr)
 
 import discord
 from discord.ext import commands, tasks
@@ -153,8 +163,8 @@ SEARCH_TERM = os.getenv("UPWORK_SEARCH_TERM", "python")
 UPWORK_BEARER_TOKEN = os.getenv("UPWORK_BEARER_TOKEN", "")
 
 # Load token and cookies from auth_manager cache or fallback to .env
-initial_auth = auth_manager.last_token or (f"Bearer {UPWORK_BEARER_TOKEN}" if UPWORK_BEARER_TOKEN and not UPWORK_BEARER_TOKEN.startswith("Bearer ") else UPWORK_BEARER_TOKEN)
-initial_cookies = auth_manager.last_cookies or 'enabled_ff=!CI12577UniversalSearch,!Fluid; visitor_id=39.45.46.214.1784269223701000'
+initial_auth = auth_manager.guest_token or auth_manager.user_token or ""
+initial_cookies = auth_manager.guest_cookies or auth_manager.user_cookies or 'enabled_ff=!CI12577UniversalSearch,!Fluid; visitor_id=39.45.46.214.1784269223701000'
 
 INTENTS = discord.Intents.default()
 INTENTS.message_content = True
@@ -451,58 +461,66 @@ async def scrape_single_target(target: dict):
         if ciphertext:
             print(f"🔍 Fetching deeper details for Job ID: {job_id} [{label}]...")
             details = await fetch_job_details(ciphertext, HEADERS, auth_manager)
-            if details:
-                opening = details.get("opening", {}) or {}
-                buyer = details.get("buyer", {}) or {}
-                buyer_extra = details.get("buyerExtra", {}) or {}
 
-        # Proposals — real number now, not a range
-                client_act = opening.get("clientActivity", {}) or {}
-                total_app = client_act.get("totalApplicants")
-                if total_app is not None:
-                    proposals = str(total_app)
+        opening = (details.get("opening") or {}) if isinstance(details, dict) else {}
+        buyer = (details.get("buyer") or {}) if isinstance(details, dict) else {}
+        buyer_extra = (details.get("buyerExtra") or {}) if isinstance(details, dict) else {}
+        qualifications = (details.get("qualifications") or {}) if isinstance(details, dict) else {}
+
+        # Proposals
+        client_act = opening.get("clientActivity", {}) or {}
+        total_app = client_act.get("totalApplicants")
+        if total_app is not None:
+            proposals = str(total_app)
 
         # Payment verification
-                if buyer_extra.get("isPaymentMethodVerified"):
-                    payment_status = "Payment Verified"
+        if buyer_extra.get("isPaymentMethodVerified"):
+            payment_status = " Payment Verified"
+        elif "isPaymentMethodVerified" in buyer_extra:
+            payment_status = " Payment Unverified"
+        else:
+            payment_status = "Payment Status Unspecified"
 
-        # Client location
-                loc = buyer.get("location", {}) or {}
-                if loc.get("country"):
-                    client_location = loc.get("country")
-                    if loc.get("city"):
-                        client_location = f"{loc.get('city')}, {client_location}"
+        # Client location extraction with multi-tier fallback
+        loc = buyer.get("location", {}) or qualifications.get("location", {}) or {}
+        if loc.get("country"):
+            client_location = loc.get("country")
+            if loc.get("city"):
+                client_location = f"{loc.get('city')}, {client_location}"
+        elif qualifications.get("countries"):
+            countries_list = qualifications.get("countries")
+            if isinstance(countries_list, list) and countries_list:
+                client_location = ", ".join(countries_list[:2])
 
-        # Buyer stats
-                stats = buyer.get("stats", {}) or {}
-                if stats:
-                    total_jobs = stats.get("totalAssignments") or 0
-                    total_hires = stats.get("totalJobsWithHires") or 0
-                    jobs_posted = str(total_jobs)
-                    if total_jobs > 0:
-                        hire_rate_str = f"{round((total_hires / total_jobs) * 100)}%"
-                    total_charges = stats.get("totalCharges", {}) or {}
-                    if total_charges.get("amount") is not None:
-                        spent_amount = total_charges.get("amount")
+        # Buyer stats (available when authenticated bearer token is configured)
+        stats = buyer.get("stats", {}) or {}
+        if stats:
+            total_jobs = stats.get("totalAssignments") or 0
+            total_hires = stats.get("totalJobsWithHires") or 0
+            jobs_posted = str(total_jobs)
+            if total_jobs > 0:
+                hire_rate_str = f"{round((total_hires / total_jobs) * 100)}%"
+            total_charges = stats.get("totalCharges", {}) or {}
+            if total_charges.get("amount") is not None:
+                spent_amount = total_charges.get("amount")
 
         # Member since
-                company = buyer.get("company", {}) or {}
-                contract_date = company.get("contractDate")
-                if contract_date:
-                    try:
-                        member_since = datetime.fromisoformat(contract_date.replace("Z", "+00:00")).strftime("%b %Y")
-                    except Exception:
-                        member_since = contract_date
+        company = buyer.get("company", {}) or {}
+        contract_date = company.get("contractDate")
+        if contract_date:
+            try:
+                member_since = datetime.fromisoformat(contract_date.replace("Z", "+00:00")).strftime("%b %Y")
+            except Exception:
+                member_since = contract_date
 
-        # Experience level — string format from this endpoint, e.g. "INTERMEDIATE"
-                raw_exp = opening.get("contractorTier")
-                if raw_exp:
-                    exp_level = str(raw_exp).replace("_", " ").title()
+        # Experience level & duration override if available in opening
+        raw_exp = opening.get("contractorTier")
+        if raw_exp:
+            exp_level = str(raw_exp).replace("_", " ").title()
 
-        # Engagement duration
-                eng_dur = opening.get("engagementDuration", {}) or {}
-                if eng_dur.get("label"):
-                    duration_str = eng_dur.get("label")
+        eng_dur = opening.get("engagementDuration", {}) or {}
+        if eng_dur.get("label"):
+            duration_str = eng_dur.get("label")
 
         short_desc = clean_text(item.get("description", "No Description"))[:200] + "..."
 
@@ -514,7 +532,7 @@ async def scrape_single_target(target: dict):
             f"**Level:** {exp_level}\n"
             f"**Time:** {detected_at}\n"
             f"**Proposals:** {proposals}\n"
-            f"**Client Info:** {payment_status}, {client_location}, ${spent_amount} spent\n\n"
+            f"**Client Info:** {payment_status} |  {client_location} |  ${spent_amount} spent\n\n"
             f"{short_desc}\n\n"
             f"[Apply Here]({job_url})"
         )
@@ -541,15 +559,20 @@ async def scrape_single_target(target: dict):
                 if hire_rate_str and hire_rate_str != "Unknown":
                     final_hire_rate = hire_rate_str if "%" in str(hire_rate_str) else f"{hire_rate_str}%"
 
+                client_section = (
+                    f"**Client Details**:\n"
+                    f"- Status: {payment_status}\n"
+                    f"- Location: 📍 {client_location}\n"
+                    f"- Total Spent: 💰 ${spent_amount}\n"
+                    f"- Jobs Posted: {jobs_posted}\n"
+                    f"- Hire Rate: {final_hire_rate}\n"
+                    f"- Member Since: {member_since}\n"
+                )
+
                 thread_details = (
                     f"**Full Job Description**:\n"
                     f"{truncated_desc}\n\n"
-                    f"**Client Details**:\n"
-                    f"- Total Spent: ${spent_amount}\n"
-                    f"- Jobs Posted: {jobs_posted}\n"
-                    f"- Hire Rate: {final_hire_rate}\n"
-                    f"- Location: {client_location}\n"
-                    f"- Member Since: {member_since}\n\n"
+                    f"{client_section}\n"
                     f"**Job Details**:\n"
                     f"- Duration: {duration_str}\n"
                     f"- Experience Level: {exp_level}\n"
@@ -580,10 +603,7 @@ async def job_scraper_loop():
         
         if auth_manager.should_refresh():
             print("⏰ Proactive timer condition met. Executing background refresh...")
-            new_cookies, new_auth = await asyncio.to_thread(auth_manager.refresh_tokens)
-            if new_cookies and new_auth:
-                HEADERS["cookie"] = new_cookies
-                HEADERS["authorization"] = new_auth
+            await asyncio.to_thread(auth_manager.refresh_tokens)
 
         # Fetch tracked targets dynamically from SQLite Database
         tracked_targets = db.get_all_targets()

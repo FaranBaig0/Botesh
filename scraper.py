@@ -159,7 +159,7 @@ fragment JobPubOpeningFragment on JobPubOpeningInfo {
     length
     uri
   }
-  clientActivity {
+  clientActivity @include(if: $isLoggedIn) {
     lastBuyerActivity
     totalApplicants
     totalHired
@@ -292,13 +292,13 @@ query JobPubDetailsQuery($id: ID!, $isLoggedIn: Boolean!) {
     qualifications {
       ...JobQualificationsFragment
     }
-    buyer {
+    buyer @include(if: $isLoggedIn) {
       ...JobPubBuyerInfoFragment
     }
     similarJobs {
       ...JobPubSimilarJobsFragment
     }
-    buyerExtra {
+    buyerExtra @include(if: $isLoggedIn) {
       isPaymentMethodVerified
     }
   }
@@ -434,14 +434,14 @@ async def post_with_exponential_backoff(url: str, headers: dict, payload: dict, 
 
 async def fetch_target_jobs(query: str, headers: dict, auth_manager) -> tuple[list, dict]:
     """
-    Fetches Upwork job search results for a query string.
+    Fetches Upwork job search results for a query string using guest headers.
     Handles 401 and empty data block token refreshes using auth_manager.
     Returns (jobs_list, updated_headers).
     """
     payload = json.loads(json.dumps(GRAPHQL_PAYLOAD))
     payload["variables"]["requestVariables"]["userQuery"] = query
 
-    target_headers = headers.copy()
+    target_headers = auth_manager.get_search_headers(headers)
     target_headers["referer"] = f"https://www.upwork.com/nx/search/jobs/?q={requests.utils.quote(query)}"
 
     response = await post_with_exponential_backoff(UPWORK_URL, target_headers, payload)
@@ -449,13 +449,11 @@ async def fetch_target_jobs(query: str, headers: dict, auth_manager) -> tuple[li
         return [], headers
 
     if response.status_code == 401:
-        print("❌ 401 Unauthorized hit. Refreshing session token...")
+        print("❌ 401 Unauthorized hit in Search module. Refreshing guest session token...")
         new_cookies, new_auth = await asyncio.to_thread(auth_manager.refresh_tokens, force=True)
         if new_cookies and new_auth:
-            headers["cookie"] = new_cookies
-            headers["authorization"] = new_auth
-            target_headers["cookie"] = new_cookies
-            target_headers["authorization"] = new_auth
+            target_headers = auth_manager.get_search_headers(headers)
+            target_headers["referer"] = f"https://www.upwork.com/nx/search/jobs/?q={requests.utils.quote(query)}"
             response = await post_with_exponential_backoff(UPWORK_URL, target_headers, payload)
             if not response:
                 return [], headers
@@ -471,13 +469,11 @@ async def fetch_target_jobs(query: str, headers: dict, auth_manager) -> tuple[li
 
     # Reactive refresh if data block is empty or contains errors
     if "data" not in data or data["data"] is None or "errors" in data:
-        print(f"⚠️ Upwork returned empty data/error for '{query}'. Refreshing token...")
+        print(f"⚠️ Upwork search returned empty data/error for '{query}'. Refreshing token...")
         new_cookies, new_auth = await asyncio.to_thread(auth_manager.refresh_tokens, force=True)
         if new_cookies and new_auth:
-            headers["cookie"] = new_cookies
-            headers["authorization"] = new_auth
-            target_headers["cookie"] = new_cookies
-            target_headers["authorization"] = new_auth
+            target_headers = auth_manager.get_search_headers(headers)
+            target_headers["referer"] = f"https://www.upwork.com/nx/search/jobs/?q={requests.utils.quote(query)}"
             response = await post_with_exponential_backoff(UPWORK_URL, target_headers, payload)
             if response:
                 data = response.json()
@@ -489,47 +485,36 @@ async def fetch_target_jobs(query: str, headers: dict, auth_manager) -> tuple[li
 
     try:
         jobs = data["data"]["search"]["universalSearchNuxt"]["visitorJobSearchV1"]["results"]
-        return jobs, headers
+        return jobs, target_headers
     except (KeyError, TypeError):
         return [], headers
 
 async def fetch_job_details(ciphertext: str, headers: dict, auth_manager) -> dict | None:
     if not ciphertext:
         return None
+
+    is_logged_in = getattr(auth_manager, "is_authenticated", False)
     payload = {
         "query": JOB_DETAILS_QUERY,
-        "variables": {"id": ciphertext, "isLoggedIn": False}
+        "variables": {"id": ciphertext, "isLoggedIn": is_logged_in}
     }
+    details_headers = auth_manager.get_details_headers(headers)
+    details_headers["referer"] = f"https://www.upwork.com/nx/search/jobs/details/{ciphertext}"
+
     try:
-        response = await post_with_exponential_backoff(UPWORK_DETAILS_URL, headers, payload)
+        response = await post_with_exponential_backoff(UPWORK_DETAILS_URL, details_headers, payload)
         if not response:
             print(f"⚠️ [Details] No response object for ciphertext {ciphertext}.")
             return None
-
-        # Check body for oauth permission errors before doing 401 refresh
-        try:
-            body = response.json()
-            if body.get("errors"):
-                err_msg = str(body["errors"])
-                if "permissions/scopes" in err_msg or "oauth2 permissions" in err_msg:
-                    print(f"ℹ️ [Details] Detailed stats are restricted for guest tokens. Using search results data.")
-                    return None
-        except Exception:
-            body = None
 
         if response.status_code == 401:
             print("⚠️ 401 Unauthorized inside job details module. Retrying refresh...")
             new_cookies, new_auth = await asyncio.to_thread(auth_manager.refresh_tokens, force=True)
             if new_cookies and new_auth:
-                headers["cookie"] = new_cookies
-                headers["authorization"] = new_auth
-                response = await post_with_exponential_backoff(UPWORK_DETAILS_URL, headers, payload)
+                details_headers = auth_manager.get_details_headers(headers)
+                response = await post_with_exponential_backoff(UPWORK_DETAILS_URL, details_headers, payload)
                 if not response:
                     return None
-                try:
-                    body = response.json()
-                except Exception:
-                    body = None
             else:
                 return None
 
@@ -537,21 +522,25 @@ async def fetch_job_details(ciphertext: str, headers: dict, auth_manager) -> dic
             print(f"❌ [Details] HTTP {response.status_code} for {ciphertext}")
             return None
 
-        if not body:
-            try:
-                body = response.json()
-            except Exception:
-                return None
-
-        if body.get("errors"):
-            print(f"❌ [Details] GraphQL errors for {ciphertext}: {body['errors']}")
-
-        data = body.get("data")
-        if not data:
+        try:
+            body = response.json()
+        except Exception:
             return None
 
-        job_pub_details = data.get("jobPubDetails")
-        return job_pub_details
+        if not body or not isinstance(body, dict):
+            return None
+
+        data = body.get("data")
+        if data and isinstance(data, dict):
+            job_pub_details = data.get("jobPubDetails")
+            if job_pub_details and isinstance(job_pub_details, dict):
+                return job_pub_details
+
+        # Log informative note if guest mode restrictions prevented full data
+        if body.get("errors"):
+            err_msg = str(body["errors"])
+            if "permissions/scopes" in err_msg or "oauth2 permissions" in err_msg:
+                print("ℹ️ [Details] Upwork restricts detailed buyer stats for guest tokens. Use an authenticated user bearer token in .env for full client analytics.")
 
     except Exception as e:
         print(f"⚠️ Secondary API Details Request Failed for {ciphertext}: {e}")
