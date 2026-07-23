@@ -145,7 +145,7 @@ class AuthManager:
                     token_str = f"Bearer {visitor_token}" if not visitor_token.startswith("Bearer ") else visitor_token
                     self.guest_cookies = cookie_string
                     self.guest_token = token_str
-                    if not self.user_token:
+                    if force or not self.user_token:
                         self.user_token = token_str
                     self.is_authenticated = True
                     self._save_cache()
