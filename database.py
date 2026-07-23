@@ -15,10 +15,18 @@ class JobDB:
                 job_id VARCHAR(255),
                 url_source VARCHAR(500),
                 first_seen TIMESTAMP,
+                content_hash VARCHAR(64),
                 PRIMARY KEY (job_id, url_source)
             )
             """
         )
+        # Migrate existing database to add content_hash column if missing
+        try:
+            self.conn.execute("ALTER TABLE seen_jobs ADD COLUMN content_hash VARCHAR(64)")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
         self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS tracked_targets (
@@ -31,6 +39,31 @@ class JobDB:
         )
         self.conn.commit()
 
+    def get_job_status(self, job_id: str, url_source: str, current_hash: str) -> str:
+        """Returns 'NEW' if not seen, 'UPDATED' if hash changed, or 'SEEN' if already processed."""
+        row = self.conn.execute(
+            "SELECT content_hash FROM seen_jobs WHERE job_id = ? AND url_source = ?",
+            (job_id, url_source),
+        ).fetchone()
+        
+        if row is None:
+            return "NEW"
+            
+        stored_hash = row[0]
+        if stored_hash is None:
+            # Update legacy database record with the new hash silently to avoid double posting older posts
+            self.conn.execute(
+                "UPDATE seen_jobs SET content_hash = ? WHERE job_id = ? AND url_source = ?",
+                (current_hash, job_id, url_source),
+            )
+            self.conn.commit()
+            return "SEEN"
+            
+        if stored_hash != current_hash:
+            return "UPDATED"
+            
+        return "SEEN"
+
     def is_new(self, job_id: str, url_source: str) -> bool:
         row = self.conn.execute(
             "SELECT 1 FROM seen_jobs WHERE job_id = ? AND url_source = ?",
@@ -38,10 +71,16 @@ class JobDB:
         ).fetchone()
         return row is None
 
-    def mark_seen(self, job_id: str, url_source: str):
+    def mark_seen(self, job_id: str, url_source: str, content_hash: str = None):
         self.conn.execute(
-            "INSERT OR IGNORE INTO seen_jobs (job_id, url_source, first_seen) VALUES (?, ?, ?)",
-            (job_id, url_source, datetime.now().isoformat()),
+            """
+            INSERT INTO seen_jobs (job_id, url_source, first_seen, content_hash)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(job_id, url_source) DO UPDATE SET
+                content_hash = excluded.content_hash,
+                first_seen = excluded.first_seen
+            """,
+            (job_id, url_source, datetime.now().isoformat(), content_hash),
         )
         self.conn.commit()
 

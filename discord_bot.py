@@ -443,7 +443,29 @@ async def post_message_safely(destination, content=None, name=None, auto_archive
             log_error_event()
             print(f"⚠️ Discord sending error: {exc}")
             return None
-async def process_and_post_job(channel, item, details, label, job_id, skills_list):
+import hashlib
+
+def calculate_job_hash(item: dict) -> str:
+    """Calculates SHA-256 hash of title, description, skills, and budget to detect updates."""
+    job_inner = item.get("jobTile", {}).get("job", {}) or {}
+    
+    title = item.get("title", "") or ""
+    desc = item.get("description", "") or ""
+    
+    # Skills
+    skills_list = [skill.get('prefLabel', '').lower() for skill in item.get('ontologySkills', []) if skill.get('prefLabel')]
+    skills = "".join(sorted(skills_list))
+    
+    # Budget
+    fixed_amount = job_inner.get("fixedPriceAmount", {}).get("amount", 0) if job_inner.get("fixedPriceAmount") else 0
+    min_rate = job_inner.get("hourlyBudgetMin", 0)
+    max_rate = job_inner.get("hourlyBudgetMax", 0)
+    budget = f"{fixed_amount}-{min_rate}-{max_rate}"
+    
+    content = f"{title}|{desc}|{skills}|{budget}"
+    return hashlib.sha256(content.encode('utf-8')).hexdigest()
+
+async def process_and_post_job(channel, item, details, label, job_id, skills_list, content_hash: str = None, is_update: bool = False):
     try:
         clean_title = clean_text(item.get("title", "No Title"))
         full_desc = clean_text(item.get("description", ""))
@@ -548,8 +570,9 @@ async def process_and_post_job(channel, item, details, label, job_id, skills_lis
 
         short_desc = clean_text(item.get("description", "No Description"))[:200] + "..."
 
+        header_text = "Job Updated!" if is_update else "New Job Posted!"
         main_message_text = (
-            f"■ **New Job Posted!** [{label}]\n"
+            f"■ **{header_text}** [{label}]\n"
             f"**Title:** {clean_title}\n"
             f"**Posted:** {posted_time_ago}\n"
             f"**Budget:** {budget_str}\n"
@@ -613,7 +636,7 @@ async def process_and_post_job(channel, item, details, label, job_id, skills_lis
             log_error_event()
             print(f"⚠️ Thread content generation/sending failed: {thread_err}")
             
-        db.mark_seen(job_id, label)
+        db.mark_seen(job_id, label, content_hash)
         await asyncio.sleep(1.2)  # Delay before processing next job in channel
 
     except Exception as exc:
@@ -669,16 +692,21 @@ async def job_scraper_loop():
             skills_list = [skill.get('prefLabel', '').lower() for skill in item.get('ontologySkills', []) if skill.get('prefLabel')]
             searchable_text = f"{clean_title.lower()} {full_desc.lower()} {' '.join(skills_list)}"
 
-            # Find matching targets where this job is new
+            # Find matching targets where this job is new or updated
             matching_targets = []
+            job_hash = calculate_job_hash(item)
             for target in tracked_targets:
                 label = target["label"]
                 query = target["userQuery"]
                 query_terms = [t.strip().lower() for t in query.split() if t.strip()]
                 matches_all = all(re.search(r'\b' + re.escape(term) + r'\b', searchable_text) for term in query_terms)
                 
-                if matches_all and db.is_new(job_id, label):
-                    matching_targets.append(target)
+                if matches_all:
+                    status = db.get_job_status(job_id, label, job_hash)
+                    if status in ["NEW", "UPDATED"]:
+                        target_with_status = target.copy()
+                        target_with_status["status"] = status
+                        matching_targets.append(target_with_status)
 
             if not matching_targets:
                 continue
@@ -696,10 +724,14 @@ async def job_scraper_loop():
             for target in matching_targets:
                 channel_id = target["channel_id"]
                 label = target["label"]
+                status = target["status"]
+                is_update = (status == "UPDATED")
+                
                 channel = bot.get_channel(channel_id)
                 if channel:
-                    print(f"📤 Posting Job ID {job_id} to channel #{channel.name} [{label}]")
-                    await process_and_post_job(channel, item, details, label, job_id, skills_list)
+                    action_word = "Reposting updated" if is_update else "Posting"
+                    print(f"📤 {action_word} Job ID {job_id} to channel #{channel.name} [{label}]")
+                    await process_and_post_job(channel, item, details, label, job_id, skills_list, content_hash=job_hash, is_update=is_update)
 
     except Exception as e:
         log_error_event()
