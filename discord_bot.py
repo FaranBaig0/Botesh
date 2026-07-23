@@ -317,8 +317,8 @@ async def delete_channel_command(ctx, *, channel_name: str = None):
     else:
         try:
             ch_name = target_channel.name
-            await target_channel.delete()
             await ctx.send(f"✅ Successfully deleted channel **#{ch_name}**!")
+            await target_channel.delete()
         except Exception as err:
             await ctx.send(f"❌ Failed to delete channel: {err}")
 
