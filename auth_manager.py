@@ -102,29 +102,26 @@ class AuthManager:
                     os.system("taskkill /f /im chrome.exe >nul 2>&1")
                 except Exception:
                     pass
-            display = None
             page = None
             try:
-                import platform
-                if platform.system().lower() == "linux":
-                    try:
-                        from pyvirtualdisplay import Display
-                        safe_print("🖥️ [AuthManager] Starting virtual framebuffer (Xvfb) for headful browser...")
-                        display = Display(visible=0, size=(1280, 1024))
-                        display.start()
-                    except Exception as e:
-                        safe_print(f"⚠️ [AuthManager] Failed to start virtual display: {e}")
-
                 from DrissionPage import ChromiumPage, ChromiumOptions
                 co = ChromiumOptions()
-                co.headless(False) # Must be False to solve/bypass Turnstile checkbox
+                
+                # Pure Headless mode!
+                co.headless(True)
+                
+                # Stealth flags to bypass Cloudflare Turnstile in headless mode
                 co.set_argument('--no-sandbox')
                 co.set_argument('--disable-gpu')
+                co.set_argument('--window-size=1920,1080')
+                co.set_argument('--start-maximized')
+                co.set_argument('--disable-dev-shm-usage')
+                
                 # Add default user agent to ensure consistency
                 co.set_user_agent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
                 
                 page = ChromiumPage(co)
-                safe_print("🔄 [AuthManager] Visiting Upwork job details page to extract tokens...")
+                safe_print("🔄 [AuthManager] Visiting Upwork job details page silently (headless)...")
                 page.get("https://www.upwork.com/nx/search/jobs/details/~022080259272497837564")
                 
                 best_token = None
@@ -140,7 +137,7 @@ class AuthManager:
                             if iframe:
                                 checkbox = iframe.ele('span.mark') or iframe.ele('.checkbox') or iframe.ele('#challenge-stage')
                                 if checkbox:
-                                    safe_print("🤖 [AuthManager] Solving Turnstile checkbox...")
+                                    safe_print("🤖 [AuthManager] Click solving Turnstile checkbox in headless mode...")
                                     checkbox.click()
                         except Exception:
                             pass
@@ -152,7 +149,7 @@ class AuthManager:
                     if token_val and ('UniversalSearchNuxt_vt' in all_c or 'JobDetailsNuxt_vt' in all_c):
                         best_token = token_val
                         cookie_string = "; ".join([f"{k}={v}" for k, v in all_c.items()])
-                        safe_print(f"🔑 Bypassed Cloudflare! Extracted Nuxt token on attempt {idx+1}")
+                        safe_print(f"🔑 Bypassed Cloudflare in pure headless! Extracted Nuxt token on attempt {idx+1}")
                         break
 
                 if not best_token and cookies:
@@ -183,11 +180,6 @@ class AuthManager:
                 if page:
                     try:
                         page.quit()
-                    except Exception:
-                        pass
-                if display:
-                    try:
-                        display.stop()
                     except Exception:
                         pass
                 time.sleep(1.5)
