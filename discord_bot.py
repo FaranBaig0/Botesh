@@ -479,40 +479,51 @@ async def scrape_single_target(target: dict):
         if total_app is not None:
             proposals = str(total_app)
 
-        # Payment verification
-        if buyer_extra.get("isPaymentMethodVerified"):
-            payment_status = " Payment Verified"
-        elif "isPaymentMethodVerified" in buyer_extra:
-            payment_status = " Payment Unverified"
+        # Payment verification status
+        is_verified = buyer_extra.get("isPaymentMethodVerified")
+        if is_verified is True:
+            payment_status = "💳 Payment Verified"
+        elif is_verified is False:
+            payment_status = "⚠️ Payment Unverified"
         else:
             payment_status = "Payment Status Unspecified"
 
-        # Client location extraction with multi-tier fallback
-        loc = buyer.get("location", {}) or qualifications.get("location", {}) or {}
-        if loc.get("country"):
+        # Client location extraction (buyer.location -> qualifications.location -> qualifications.countries)
+        loc = (buyer.get("location") or {}) if isinstance(buyer, dict) else {}
+        if not loc:
+            loc = (qualifications.get("location") or {}) if isinstance(qualifications, dict) else {}
+        
+        if isinstance(loc, dict) and loc.get("country"):
             client_location = loc.get("country")
             if loc.get("city"):
                 client_location = f"{loc.get('city')}, {client_location}"
-        elif qualifications.get("countries"):
+        elif isinstance(qualifications, dict) and qualifications.get("countries"):
             countries_list = qualifications.get("countries")
             if isinstance(countries_list, list) and countries_list:
                 client_location = ", ".join(countries_list[:2])
 
-        # Buyer stats (available when authenticated bearer token is configured)
-        stats = buyer.get("stats", {}) or {}
-        if stats:
-            total_jobs = stats.get("totalAssignments") or 0
-            total_hires = stats.get("totalJobsWithHires") or 0
-            jobs_posted = str(total_jobs)
-            if total_jobs > 0:
-                hire_rate_str = f"{round((total_hires / total_jobs) * 100)}%"
-            total_charges = stats.get("totalCharges", {}) or {}
-            if total_charges.get("amount") is not None:
+        # Jobs posted, hire rate, and total spent extraction
+        stats = (buyer.get("stats") or {}) if isinstance(buyer, dict) else {}
+        jobs_obj = (buyer.get("jobs") or {}) if isinstance(buyer, dict) else {}
+
+        posted_count = jobs_obj.get("postedCount") if isinstance(jobs_obj, dict) else None
+        total_assignments = stats.get("totalAssignments") if isinstance(stats, dict) else None
+        total_hires = stats.get("totalJobsWithHires") if isinstance(stats, dict) else 0
+
+        total_posted = posted_count if posted_count is not None else (total_assignments if total_assignments is not None else 0)
+        jobs_posted = str(total_posted) if total_posted > 0 else "0"
+
+        if total_posted > 0 and total_hires is not None:
+            hire_rate_str = f"{round((total_hires / total_posted) * 100)}%"
+
+        if isinstance(stats, dict):
+            total_charges = stats.get("totalCharges") or {}
+            if isinstance(total_charges, dict) and total_charges.get("amount") is not None:
                 spent_amount = total_charges.get("amount")
 
-        # Member since
-        company = buyer.get("company", {}) or {}
-        contract_date = company.get("contractDate")
+        # Member since extraction
+        company = (buyer.get("company") or {}) if isinstance(buyer, dict) else {}
+        contract_date = company.get("contractDate") if isinstance(company, dict) else None
         if contract_date:
             try:
                 member_since = datetime.fromisoformat(contract_date.replace("Z", "+00:00")).strftime("%b %Y")
