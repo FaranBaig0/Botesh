@@ -507,13 +507,37 @@ async def fetch_job_details(ciphertext: str, headers: dict, auth_manager) -> dic
             print(f"⚠️ [Details] No response object for ciphertext {ciphertext}.")
             return None
 
+        # Check if HTTP is 401 or if response has auth/permission errors
+        is_auth_error = False
+        body = None
         if response.status_code == 401:
-            print("⚠️ 401 Unauthorized inside job details module. Retrying refresh...")
+            is_auth_error = True
+        elif response.status_code == 200:
+            try:
+                body = response.json()
+                if body and isinstance(body, dict):
+                    errors = body.get("errors")
+                    data = body.get("data")
+                    # If GraphQL returned errors and we didn't get valid job details
+                    if errors and (not data or not isinstance(data, dict) or not data.get("jobPubDetails")):
+                        err_msg = str(errors).lower()
+                        if any(term in err_msg for term in ["permission", "scope", "oauth2", "unauthorized", "token", "auth"]):
+                            is_auth_error = True
+            except Exception:
+                pass
+
+        if is_auth_error:
+            print("⚠️ Unauthorized or permission restriction in job details. Refreshing token...")
             new_cookies, new_auth = await asyncio.to_thread(auth_manager.refresh_tokens, force=True)
             if new_cookies and new_auth:
                 details_headers = auth_manager.get_details_headers(headers)
                 response = await post_with_exponential_backoff(UPWORK_DETAILS_URL, details_headers, payload)
-                if not response:
+                if response and response.status_code == 200:
+                    try:
+                        body = response.json()
+                    except Exception:
+                        return None
+                else:
                     return None
             else:
                 return None
@@ -522,26 +546,25 @@ async def fetch_job_details(ciphertext: str, headers: dict, auth_manager) -> dic
             print(f"❌ [Details] HTTP {response.status_code} for {ciphertext}")
             return None
 
-        try:
-            body = response.json()
-        except Exception:
-            return None
+        if not body:
+            try:
+                body = response.json()
+            except Exception:
+                return None
 
         if not body or not isinstance(body, dict):
             return None
 
-        # Always try to extract data first, even if errors are present
+        # Always try to extract data first
         data = body.get("data")
         if data and isinstance(data, dict):
             job_pub_details = data.get("jobPubDetails")
             if job_pub_details and isinstance(job_pub_details, dict):
                 return job_pub_details
 
-        # Only log error if data was truly empty (not just partial)
+        # Log warning if token lacks permissions
         if body.get("errors") and not data:
-            err_msg = str(body["errors"])
-            if "permissions/scopes" in err_msg or "oauth2 permissions" in err_msg:
-                print("ℹ️ [Details] Upwork restricts detailed buyer stats for guest tokens. Use an authenticated user bearer token in .env for full client analytics.")
+            print("ℹ️ [Details] Upwork restricts detailed buyer stats for this guest token.")
 
     except Exception as e:
         print(f"⚠️ Secondary API Details Request Failed for {ciphertext}: {e}")
