@@ -1,64 +1,120 @@
 import os
 import json
-import psutil
-import threading
+import sqlite3
+import re
 import sys
+import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime, timedelta
 
-# Global references to share state from the bot
-_auth_manager = None
-_db = None
-_bot_start_time = None
-_error_timestamps = None
-
-# Custom Logger redirection path to read logs dynamically
+# Decoupled Standalone Dashboard Server for Botesh Scraper
 LOG_FILE_PATH = "bot.log"
+CACHE_FILE_PATH = "session_cache.json"
+DB_FILE_PATH = "jobs.db"
 
 def get_recent_errors_count():
-    global _error_timestamps
-    if not _error_timestamps:
+    if not os.path.exists(LOG_FILE_PATH):
         return 0
-    one_hour_ago = datetime.now() - timedelta(hours=1)
-    # Filter error timestamps in place
     try:
-        # Avoid thread mutation crashes
-        timestamps_copy = list(_error_timestamps)
-        recent = [t for t in timestamps_copy if t >= one_hour_ago]
-        return len(recent)
+        with open(LOG_FILE_PATH, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()[-300:] # check last 300 lines
+            one_hour_ago = datetime.now() - timedelta(hours=1)
+            error_count = 0
+            for line in lines:
+                # Match log timestamps: [2026-07-24 10:15:56]
+                m = re.match(r"^\[([0-9\-:\s]+)\]", line)
+                if m:
+                    try:
+                        ts = datetime.fromisoformat(m.group(1))
+                        if ts >= one_hour_ago and ("❌" in line or "[ERROR]" in line or "⚠️" in line):
+                            error_count += 1
+                    except Exception:
+                        pass
+            return error_count
     except Exception:
-        return len(_error_timestamps)
+        return 0
 
-def get_uptime_hours():
-    if not _bot_start_time:
+def get_bot_uptime_hours():
+    if not os.path.exists(LOG_FILE_PATH):
         return 0.0
-    elapsed = datetime.now() - _bot_start_time
-    return round(elapsed.total_seconds() / 3600, 2)
-
-def get_memory_usage_mb():
     try:
-        process = psutil.Process(os.getpid())
-        return round(process.memory_info().rss / (1024 * 1024), 2)
+        with open(LOG_FILE_PATH, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+            launch_time = None
+            for line in reversed(lines):
+                if "🚀 Launching Upwork Discord Job Scraper Engine" in line or "Launching Upwork Discord" in line:
+                    m = re.match(r"^\[([0-9\-:\s]+)\]", line)
+                    if m:
+                        try:
+                            launch_time = datetime.fromisoformat(m.group(1))
+                            break
+                        except Exception:
+                            pass
+            if launch_time:
+                elapsed = datetime.now() - launch_time
+                return round(elapsed.total_seconds() / 3600, 2)
     except Exception:
+        pass
+    return 0.0
+
+def get_bot_memory_usage_mb():
+    if not os.path.exists(LOG_FILE_PATH):
         return 0.0
+    try:
+        with open(LOG_FILE_PATH, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()[-200:]
+            for line in reversed(lines):
+                m = re.search(r"Process RSS Memory Usage:\s*(\d+\.?\d*)\s*MB", line)
+                if m:
+                    return float(m.group(1))
+    except Exception:
+        pass
+    return 0.0
 
 def get_token_status():
-    if not _auth_manager:
-        return "Not Initialized", "N/A"
-    ts = _auth_manager.token_timestamp
-    if not ts:
+    if not os.path.exists(CACHE_FILE_PATH):
         return "Expired / Uninitialized", "N/A"
-    
-    elapsed = datetime.now() - ts
-    if elapsed >= _auth_manager.token_lifetime:
-        return "Expired", ts.strftime("%Y-%m-%d %H:%M:%S")
-    
-    remaining = _auth_manager.token_lifetime - elapsed
-    hours, remainder = divmod(remaining.seconds, 3600)
-    minutes, _ = divmod(remainder, 60)
-    countdown = f"{hours}h {minutes}m remaining"
-    
-    return f"Active ({countdown})", ts.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with open(CACHE_FILE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            ts_str = data.get("timestamp")
+            if not ts_str:
+                return "Expired / Uninitialized", "N/A"
+            
+            ts = datetime.fromisoformat(ts_str)
+            elapsed = datetime.now() - ts
+            lifetime = timedelta(hours=11)
+            
+            if elapsed >= lifetime:
+                return "Expired", ts.strftime("%Y-%m-%d %H:%M:%S")
+            
+            remaining = lifetime - elapsed
+            hours, remainder = divmod(remaining.seconds, 3600)
+            minutes, _ = divmod(remainder, 60)
+            countdown = f"{hours}h {minutes}m remaining"
+            return f"Active ({countdown})", ts.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return "Error Reading Cache", "N/A"
+
+def get_db_stats():
+    targets = []
+    total_seen_jobs = 0
+    if os.path.exists(DB_FILE_PATH):
+        try:
+            # Connect to sqlite database directly
+            conn = sqlite3.connect(DB_FILE_PATH)
+            # Fetch active targets
+            cursor = conn.execute("SELECT channel_id, label, user_query FROM tracked_targets")
+            for row in cursor.fetchall():
+                targets.append({"channel_id": row[0], "label": row[1], "userQuery": row[2]})
+            # Fetch total seen jobs count
+            row = conn.execute("SELECT COUNT(*) FROM seen_jobs").fetchone()
+            if row:
+                total_seen_jobs = row[0]
+            conn.close()
+        except Exception:
+            pass
+    return targets, total_seen_jobs
 
 def read_last_logs(limit=35):
     if not os.path.exists(LOG_FILE_PATH):
@@ -83,23 +139,12 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             
-            targets = []
-            total_seen_jobs = 0
-            if _db:
-                try:
-                    targets = _db.get_all_targets()
-                    # Count seen jobs
-                    row = _db.conn.execute("SELECT COUNT(*) FROM seen_jobs").fetchone()
-                    if row:
-                        total_seen_jobs = row[0]
-                except Exception:
-                    pass
-
+            targets, total_seen_jobs = get_db_stats()
             token_state, token_time = get_token_status()
             
             status_data = {
-                'uptime_hours': get_uptime_hours(),
-                'memory_usage_mb': get_memory_usage_mb(),
+                'uptime_hours': get_bot_uptime_hours(),
+                'memory_usage_mb': get_bot_memory_usage_mb(),
                 'active_targets_count': len(targets),
                 'total_seen_jobs': total_seen_jobs,
                 'errors_last_hour': get_recent_errors_count(),
@@ -463,7 +508,7 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
 
             <!-- Memory usage -->
             <div class="card">
-                <div class="card-label">RSS RAM Usage</div>
+                <div class="card-label">Bot RAM Usage</div>
                 <div class="card-value" id="ram-val">0.00 MB</div>
                 <div class="card-subtext">Process memory allocation</div>
             </div>
@@ -521,7 +566,6 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
         const API_URL = '/api/status';
 
         function colorizeLogLine(line) {
-            // Regex to match timestamp bracket: [2026-07-24 10:15:56]
             const timestampMatch = line.match(/^(\[[0-9\-:\s]+\])\s?(.*)$/);
             
             let timeStr = "";
@@ -533,13 +577,13 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
             }
 
             let lineClass = "";
-            if (restOfLine.includes("✅") || restOfLine.includes("Posting") || restOfLine.includes("kamyab") || restOfLine.includes("extracted")) {
+            if (restOfLine.includes("✅") || restOfLine.includes("Posting") || restOfLine.includes("kamyab") || restOfLine.includes("extracted") || restOfLine.includes("Bypassed")) {
                 lineClass = "log-success";
             } else if (restOfLine.includes("❌") || restOfLine.includes("Error") || restOfLine.includes("failed")) {
                 lineClass = "log-danger";
-            } else if (restOfLine.includes("⚠️") || restOfLine.includes("Warning") || restOfLine.includes("Retrying") || restOfLine.includes("Proactive")) {
+            } else if (restOfLine.includes("⚠️") || restOfLine.includes("Warning") || restOfLine.includes("Retrying") || restOfLine.includes("Proactive") || restOfLine.includes("Skipping")) {
                 lineClass = "log-warning";
-            } else if (restOfLine.includes("📡") || restOfLine.includes("Loop Triggered") || restOfLine.includes("Checking")) {
+            } else if (restOfLine.includes("📡") || restOfLine.includes("Loop Triggered") || restOfLine.includes("Checking") || restOfLine.includes("Triggered")) {
                 lineClass = "log-info";
             } else {
                 lineClass = "log-system";
@@ -611,27 +655,24 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
 </html>
 """
 
-def start_dashboard_server(auth_manager, db, bot_start_time, error_timestamps, start_port=8080):
-    """Entry point to configure state and start the dashboard server in a daemon thread."""
-    global _auth_manager, _db, _bot_start_time, _error_timestamps
-    _auth_manager = auth_manager
-    _db = db
-    _bot_start_time = bot_start_time
-    _error_timestamps = error_timestamps
+def run_standalone_server(port=8080):
+    for p in [port, 8081, 8000, 5000, 5001]:
+        try:
+            server = HTTPServer(('0.0.0.0', p), DashboardHTTPHandler)
+            print("==================================================")
+            print(f"🟢 [Monitoring] Premium Jade & Olive Dashboard active!")
+            print(f"🔗 URL: http://localhost:{p}/")
+            print("==================================================")
+            server.serve_forever()
+            break
+        except OSError:
+            continue
+        except KeyboardInterrupt:
+            print("\n👋 Dashboard Server shut down. Goodbye!")
+            break
+        except Exception as e:
+            print(f"❌ [Dashboard Error]: {e}")
+            break
 
-    def run_server():
-        for port in [start_port, 8000, 5000, 5001, 5002, 5003]:
-            try:
-                server = HTTPServer(('0.0.0.0', port), DashboardHTTPHandler)
-                print(f"🟢 [Monitoring] Premium Jade & Olive Dashboard started at http://localhost:{port}/")
-                server.serve_forever()
-                break
-            except OSError:
-                continue
-            except Exception as e:
-                print(f"❌ [Dashboard Server Error]: {e}")
-                break
-
-    t = threading.Thread(target=run_server, daemon=True)
-    t.start()
-    return t
+if __name__ == "__main__":
+    run_standalone_server()

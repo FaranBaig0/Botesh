@@ -94,44 +94,7 @@ def last_refresh_time():
         return auth_manager.token_timestamp.strftime("%Y-%m-%d %H:%M:%S")
     return "N/A"
 
-class StatusHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == '/status':
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            
-            status_data = {
-                'uptime_hours': calculate_uptime(),
-                'jobs_posted_last_hour': db.count_recent_jobs(1),
-                'last_token_refresh': last_refresh_time(),
-                'memory_usage_mb': get_memory_usage(),
-                'active_urls': len(db.get_all_targets()),
-                'errors_last_hour': count_recent_errors()
-            }
-            self.wfile.write(json.dumps(status_data).encode('utf-8'))
-        else:
-            self.send_response(404)
-            self.end_headers()
-            self.wfile.write(b"Not Found")
-
-    def log_message(self, format, *args):
-        pass # Silence logging in console to keep terminal outputs clean
-
-def run_status_server():
-    for port in [8080, 8000, 5000, 5001, 5002, 5003]:
-        try:
-            server = HTTPServer(('0.0.0.0', port), StatusHandler)
-            print(f"📊 [Monitoring] Status dashboard server started at http://localhost:{port}/status")
-            server.serve_forever()
-            break
-        except OSError:
-            continue
-        except Exception:
-            break
-
-threading.Thread(target=run_status_server, daemon=True).start()
+# HTTP server removed. Decoupled dashboard is handled in dashboard_server.py.
 
 load_dotenv()
 
