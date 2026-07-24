@@ -720,6 +720,17 @@ async def job_scraper_loop():
                 print(f"🔍 Fetching deeper details for Job ID: {job_id} once for targets: {[t['label'] for t in matching_targets]}")
                 details = await fetch_job_details(ciphertext, HEADERS, auth_manager)
 
+            # Filter out non-public jobs (Access levels: 1 = Public, 2 = Upwork Users Only, 3 = Private)
+            if details:
+                opening = (details.get("opening") or {}) if isinstance(details, dict) else {}
+                info = (opening.get("info") or {}) if isinstance(opening, dict) else {}
+                access_type = info.get("access")
+                if access_type not in [1, "PUBLIC", "public", None]:
+                    print(f"⏭️ Skipping Job ID {job_id} [targets: {[t['label'] for t in matching_targets]}]: Job is restricted/private (Access: {access_type}).")
+                    for target in matching_targets:
+                        db.mark_seen(job_id, target["label"], job_hash)
+                    continue
+
             # Post to each matching target channel
             for target in matching_targets:
                 channel_id = target["channel_id"]
