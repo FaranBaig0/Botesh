@@ -61,9 +61,9 @@ from scraper import (
 auth_manager = AuthManager()
 
 # ─── Uptime & Error Monitoring Dashboard ──────────────────────────────────────
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
 from datetime import datetime, timedelta
-import dashboard_server
 
 bot_start_time = datetime.now()
 error_timestamps = []
@@ -93,6 +93,45 @@ def last_refresh_time():
     if auth_manager.token_timestamp:
         return auth_manager.token_timestamp.strftime("%Y-%m-%d %H:%M:%S")
     return "N/A"
+
+class StatusHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/status':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            
+            status_data = {
+                'uptime_hours': calculate_uptime(),
+                'jobs_posted_last_hour': db.count_recent_jobs(1),
+                'last_token_refresh': last_refresh_time(),
+                'memory_usage_mb': get_memory_usage(),
+                'active_urls': len(db.get_all_targets()),
+                'errors_last_hour': count_recent_errors()
+            }
+            self.wfile.write(json.dumps(status_data).encode('utf-8'))
+        else:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"Not Found")
+
+    def log_message(self, format, *args):
+        pass # Silence logging in console to keep terminal outputs clean
+
+def run_status_server():
+    for port in [8080, 8000, 5000, 5001, 5002, 5003]:
+        try:
+            server = HTTPServer(('0.0.0.0', port), StatusHandler)
+            print(f"📊 [Monitoring] Status dashboard server started at http://localhost:{port}/status")
+            server.serve_forever()
+            break
+        except OSError:
+            continue
+        except Exception:
+            break
+
+threading.Thread(target=run_status_server, daemon=True).start()
 
 load_dotenv()
 
@@ -166,9 +205,6 @@ db = JobDB("jobs.db")
 # Seed initial targets into SQLite DB from config.json if DB table is empty
 initial_config = load_config()
 db.seed_initial_targets(initial_config.get("tracked_urls", []))
-
-# Start the premium Jade & Olive dashboard server
-dashboard_server.start_dashboard_server(auth_manager, db, bot_start_time, error_timestamps)
 
 
 @bot.event
@@ -684,12 +720,12 @@ async def job_scraper_loop():
                 print(f"🔍 Fetching deeper details for Job ID: {job_id} once for targets: {[t['label'] for t in matching_targets]}")
                 details = await fetch_job_details(ciphertext, HEADERS, auth_manager)
 
-            # Filter out non-public jobs (Access levels: 1 = Public, 2 = Upwork Users Only, 3 = Private)
+            # Filter out non-public jobs (Access levels: USERS_ONLY = Upwork Users Only, PRIVATE = Private)
             if details:
                 opening = (details.get("opening") or {}) if isinstance(details, dict) else {}
                 info = (opening.get("info") or {}) if isinstance(opening, dict) else {}
                 access_type = info.get("access")
-                if access_type not in [1, "PUBLIC", "public", None]:
+                if str(access_type).upper() in ["USERS_ONLY", "PRIVATE", "2", "3"]:
                     print(f"⏭️ Skipping Job ID {job_id} [targets: {[t['label'] for t in matching_targets]}]: Job is restricted/private (Access: {access_type}).")
                     for target in matching_targets:
                         db.mark_seen(job_id, target["label"], job_hash)
