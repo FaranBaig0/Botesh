@@ -10,6 +10,8 @@ except Exception:
     pass
 
 from discord_bot import bot, DISCORD_TOKEN, db
+import threading
+from dashboard_server import run_standalone_server
 
 def graceful_shutdown(sig, frame):
     signal_name = "SIGINT (Ctrl+C)" if sig == signal.SIGINT else "SIGTERM (System Termination)"
@@ -28,6 +30,10 @@ def start():
     print("==================================================")
     print("🚀 Launching Upwork Discord Job Scraper Engine...")
     print("==================================================")
+
+    # Start the standalone Jade & Olive dashboard server in a daemon thread
+    t = threading.Thread(target=run_standalone_server, kwargs={"port": 8080}, daemon=True)
+    t.start()
 
     # Register OS signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, graceful_shutdown)
