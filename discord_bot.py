@@ -720,16 +720,21 @@ async def job_scraper_loop():
                 print(f"🔍 Fetching deeper details for Job ID: {job_id} once for targets: {[t['label'] for t in matching_targets]}")
                 details = await fetch_job_details(ciphertext, HEADERS, auth_manager)
 
-            # Filter out non-public jobs (Access levels: USERS_ONLY = Upwork Users Only, PRIVATE = Private)
-            if details:
-                opening = (details.get("opening") or {}) if isinstance(details, dict) else {}
-                info = (opening.get("info") or {}) if isinstance(opening, dict) else {}
-                access_type = info.get("access")
-                if str(access_type).upper() in ["USERS_ONLY", "PRIVATE", "2", "3"]:
-                    print(f"⏭️ Skipping Job ID {job_id} [targets: {[t['label'] for t in matching_targets]}]: Job is restricted/private (Access: {access_type}).")
-                    for target in matching_targets:
-                        db.mark_seen(job_id, target["label"], job_hash)
-                    continue
+            # Filter out non-public or failed details jobs
+            if not details:
+                print(f"⏭️ Skipping Job ID {job_id} [targets: {[t['label'] for t in matching_targets]}]: Failed to fetch details (likely restricted or deleted).")
+                for target in matching_targets:
+                    db.mark_seen(job_id, target["label"], job_hash)
+                continue
+
+            opening = (details.get("opening") or {}) if isinstance(details, dict) else {}
+            info = (opening.get("info") or {}) if isinstance(opening, dict) else {}
+            access_type = info.get("access")
+            if str(access_type).upper() in ["USERS_ONLY", "PRIVATE", "2", "3"]:
+                print(f"⏭️ Skipping Job ID {job_id} [targets: {[t['label'] for t in matching_targets]}]: Job is restricted/private (Access: {access_type}).")
+                for target in matching_targets:
+                    db.mark_seen(job_id, target["label"], job_hash)
+                continue
 
             # Post to each matching target channel
             for target in matching_targets:
