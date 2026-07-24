@@ -50,7 +50,7 @@ GRAPHQL_PAYLOAD = {
         "requestVariables": {
             "userQuery": "python",
             "sort": "recency+desc",
-            "highlight": True,
+            "highlight": False,
             "paging": {"offset": 0, "count": 10},
         }
     },

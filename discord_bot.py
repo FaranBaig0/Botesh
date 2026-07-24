@@ -589,6 +589,9 @@ async def process_and_post_job(channel, item, details, label, job_id, skills_lis
             print(f"❌ Failed to send main job message for Job ID {job_id}.")
             return
             
+        # Mark seen immediately to prevent double-posting if subsequent steps (details, thread) fail
+        db.mark_seen(job_id, label, content_hash)
+            
         await asyncio.sleep(0.8)  # Delay between main message and thread creation
 
         try:
@@ -636,7 +639,6 @@ async def process_and_post_job(channel, item, details, label, job_id, skills_lis
             log_error_event()
             print(f"⚠️ Thread content generation/sending failed: {thread_err}")
             
-        db.mark_seen(job_id, label, content_hash)
         await asyncio.sleep(1.2)  # Delay before processing next job in channel
 
     except Exception as exc:
