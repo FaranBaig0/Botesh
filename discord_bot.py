@@ -94,9 +94,6 @@ def last_refresh_time():
         return auth_manager.token_timestamp.strftime("%Y-%m-%d %H:%M:%S")
     return "N/A"
 
-# Start the premium Jade & Olive dashboard server
-dashboard_server.start_dashboard_server(auth_manager, db, bot_start_time, error_timestamps)
-
 load_dotenv()
 
 def load_config():
@@ -169,6 +166,9 @@ db = JobDB("jobs.db")
 # Seed initial targets into SQLite DB from config.json if DB table is empty
 initial_config = load_config()
 db.seed_initial_targets(initial_config.get("tracked_urls", []))
+
+# Start the premium Jade & Olive dashboard server
+dashboard_server.start_dashboard_server(auth_manager, db, bot_start_time, error_timestamps)
 
 
 @bot.event

@@ -32,3 +32,6 @@ bot.log
 *.swp
 *.swo
 .DS_Store
+
+testing/
+testing
